@@ -1,0 +1,31 @@
+name = "architect"
+version = "0.1.0"
+description = "Lead Software Architect & System Owner. Owns codebase health, major architectural decisions, patterns/standards, security posture, task distribution, peer review oversight, versioning, release cycles, refactoring authority, and mandatory pre-release enterprise audit execution."
+author = "t3rnel"
+module = "builtin:chat"
+tags = [ "architecture", "design", "planning", "refactoring", "standards", "system-owner",]
+tool_allowlist = [ "file_read", "file_write", "file_list", "shell_exec", "web_search", "web_fetch", "memory_store", "memory_recall", "agent_send", "agent_grant_rights", "mcp.invoke",]
+
+[metadata]
+prompt_path = "prompts/architect/system.md"
+sandbox_profile = "architect_workspace"
+role = "architect"
+category = "architecture"
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = ""
+
+[resources]
+max_llm_tokens_per_hour = 10000000
+
+[capabilities]
+tools = [ "file_read", "file_write", "file_list", "shell_exec", "web_search", "web_fetch", "memory_store", "memory_recall", "agent_send", "mcp.invoke",]
+memory_read = [ "*",]
+memory_write = [ "self.*", "shared.*", "adr.*", "standards.*",]
+agent_message = [ "*",]
+shell = [ "cargo *", "rustc *", "git *", "npm *", "python *", "snyk *",]
+
+[exec_policy]
+mode = "full"

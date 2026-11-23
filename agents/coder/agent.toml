@@ -1,0 +1,33 @@
+name = "coder"
+version = "0.1.0"
+description = "Expert software engineer. Reads, writes, and analyzes code."
+author = "t3rnel"
+module = "builtin:chat"
+tags = [ "coding", "implementation", "rust", "python",]
+tool_allowlist = [ "file_read", "file_write", "file_list", "shell_exec", "web_search", "web_fetch", "memory_store", "memory_recall",]
+
+[metadata]
+prompt_path = "prompts/coder/system.md"
+sandbox_profile = "docker_coding_workspace"
+role = "coder"
+category = "coding"
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = ""
+
+[resources]
+max_llm_tokens_per_hour = 10000000
+max_concurrent_tools = 10
+
+[capabilities]
+tools = [ "file_read", "file_write", "file_list", "shell_exec", "web_search", "web_fetch", "memory_store", "memory_recall", "agent_send", "mcp.invoke",]
+network = [ "*",]
+memory_read = [ "*",]
+memory_write = [ "self.*",]
+agent_message = [ "*",]
+shell = [ "cargo *", "rustc *", "git *", "npm *", "python *",]
+
+[exec_policy]
+mode = "full"

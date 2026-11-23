@@ -1,0 +1,14 @@
+{
+  "id": "cli-todo-app",
+  "prompt": "Build a Rust CLI todo app with add, list, complete, and delete commands.",
+  "acceptance": [
+    "The project builds successfully.",
+    "Unit tests cover add, list, complete, and delete behavior.",
+    "The CLI persists todos to a local file or embedded database.",
+    "The README documents installation and command usage."
+  ],
+  "required_commands": [
+    "./t3rnel-services.sh --build daemon",
+    "./t3rnel-services.sh --test unit-rust:t3rnel-eval"
+  ]
+}

@@ -1,0 +1,27 @@
+[package]
+name = "t3rnel-hands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hands system for T3rnel — curated autonomous capability packages"
+
+[dependencies]
+t3rnel-types = { path = "../t3rnel-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+dirs = { workspace = true }
+base64 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,30 @@
+name = "devops-lead"
+version = "0.1.0"
+description = "DevOps lead. Manages CI/CD, infrastructure, deployments, monitoring, and incident response."
+author = "t3rnel"
+module = "builtin:chat"
+
+[metadata]
+prompt_path = "prompts/devops-lead/system.md"
+sandbox_profile = "devops_workspace"
+role = "devops_lead"
+tags = [ "devops", "ci", "deployment", "monitoring", "incident-response",]
+category = "operations"
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = ""
+
+[resources]
+max_llm_tokens_per_hour = 10000000
+
+[capabilities]
+tools = [ "file_read", "file_write", "file_list", "shell_exec", "memory_store", "memory_recall", "agent_send", "mcp.invoke",]
+memory_read = [ "*",]
+memory_write = [ "self.*", "shared.*",]
+agent_message = [ "*",]
+shell = [ "docker *", "git *", "cargo *", "kubectl *",]
+
+[exec_policy]
+mode = "full"

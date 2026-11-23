@@ -1,0 +1,30 @@
+[package]
+name = "t3rnel-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Memory substrate for the T3rnel Agent OS"
+
+[features]
+default = ["http-memory"]
+http-memory = []
+
+[dependencies]
+t3rnel-types = { path = "../t3rnel-types" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,33 @@
+name = "security-auditor"
+version = "0.1.0"
+description = "Security specialist. Reviews code for vulnerabilities, checks configurations, performs threat modeling."
+author = "t3rnel"
+module = "builtin:chat"
+tags = [ "security", "audit", "vulnerability",]
+tool_allowlist = [ "file_read", "file_list", "shell_exec", "memory_store", "memory_recall",]
+
+[metadata]
+prompt_path = "prompts/security_auditor/system.md"
+sandbox_profile = "security_audit_workspace"
+role = "security_auditor"
+category = "coding"
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = ""
+
+[resources]
+max_llm_tokens_per_hour = 10000000
+
+[capabilities]
+tools = [ "file_read", "file_list", "shell_exec", "memory_store", "memory_recall", "agent_send", "mcp.invoke",]
+memory_read = [ "*",]
+memory_write = [ "self.*", "shared.*",]
+agent_message = [ "*",]
+shell = [ "cargo audit *", "cargo tree *", "git log *",]
+
+[exec_policy]
+mode = "full"
+
+[schedule.reactive]

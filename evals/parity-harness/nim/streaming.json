@@ -1,0 +1,30 @@
+{
+  "provider": "nvidia",
+  "model": "minimaxai/minimax-m3",
+  "request": {
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Say ok."
+      }
+    ]
+  },
+  "events": [
+    {
+      "data": {
+        "choices": [
+          {
+            "delta": {
+              "content": "ok"
+            },
+            "finish_reason": null
+          }
+        ]
+      }
+    },
+    {
+      "data": "[DONE]"
+    }
+  ]
+}

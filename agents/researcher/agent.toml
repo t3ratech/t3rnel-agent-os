@@ -1,0 +1,30 @@
+name = "researcher"
+version = "0.1.0"
+description = "Research agent. Fetches web content and synthesizes information."
+author = "t3rnel"
+module = "builtin:chat"
+tags = [ "research", "analysis", "web",]
+
+[metadata]
+prompt_path = "prompts/researcher/system.md"
+sandbox_profile = "research_workspace"
+role = "researcher"
+category = "research"
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = ""
+
+[resources]
+max_llm_tokens_per_hour = 10000000
+
+[capabilities]
+tools = [ "web_search", "web_fetch", "file_read", "file_write", "file_list", "memory_store", "memory_recall", "agent_send", "mcp.invoke", "browser_navigate", "browser_read_page", "browser_list_tabs", "browser_switch_tab", "browser_snapshot", "browser_screenshot", "browser_click", "browser_fill", "browser_type", "browser_select", "browser_scroll", "browser_press", "browser_wait", "browser_evaluate", "browser_run_js", "browser_back", "browser_forward", "browser_reload", "browser_close", "browser_close_tab", "browser_hover", "event_publish", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "research_add",]
+network = [ "*",]
+memory_read = [ "*",]
+memory_write = [ "self.*", "shared.*",]
+agent_message = [ "*",]
+
+[exec_policy]
+mode = "full"

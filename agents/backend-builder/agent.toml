@@ -1,0 +1,33 @@
+name = "backend-builder"
+version = "0.1.0"
+description = "Rust backend specialist. Extends kernel, API, gRPC services, and data layer. Implements cross-surface sync and backend features."
+author = "t3rnel"
+module = "builtin:chat"
+tags = [ "backend", "rust", "api", "grpc", "database",]
+tool_allowlist = [ "file_read", "file_write", "file_list", "shell_exec", "memory_store", "memory_recall", "agent_send", "task_claim", "task_complete",]
+
+[metadata]
+prompt_path = "prompts/backend-builder/system.md"
+sandbox_profile = "docker_coding_workspace"
+role = "backend_builder"
+category = "coding"
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = ""
+
+[resources]
+max_llm_tokens_per_hour = 10000000
+max_concurrent_tools = 8
+
+[capabilities]
+tools = [ "file_read", "file_write", "file_list", "shell_exec", "memory_store", "memory_recall", "agent_send", "task_claim", "task_complete", "mcp.invoke",]
+network = [ "*",]
+memory_read = [ "swarm.*", "api.*", "shared.*", "kernel.*",]
+memory_write = [ "self.*", "swarm.*", "api.*", "kernel.*",]
+shell = [ "cargo *", "rustc *", "git *", "docker *",]
+agent_message = [ "*",]
+
+[exec_policy]
+mode = "full"

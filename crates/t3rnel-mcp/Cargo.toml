@@ -1,0 +1,28 @@
+[package]
+name = "t3rnel-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP server for T3rnel Agent OS — exposes daemon API as Model Context Protocol tools"
+
+[[bin]]
+name = "t3rnel-mcp"
+path = "src/main.rs"
+
+[dependencies]
+t3rnel-types = { path = "../t3rnel-types" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

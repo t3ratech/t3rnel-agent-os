@@ -1,0 +1,23 @@
+[package]
+name = "t3rnel-prompts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Versioned prompt store for T3rnel"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+walkdir = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+

@@ -1,0 +1,31 @@
+name = "reviewer"
+version = "0.1.0"
+description = "Pipeline reviewer. Reviews proposed changes for correctness, maintainability, tests, and release readiness."
+author = "t3rnel"
+module = "builtin:chat"
+tags = [ "review", "pipeline", "quality", "correctness",]
+tool_allowlist = [ "file_read", "file_list", "memory_store", "memory_recall", "agent_send",]
+
+[metadata]
+prompt_path = "prompts/reviewer/system.md"
+sandbox_profile = "read_only_workspace"
+role = "reviewer"
+category = "coding"
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = ""
+
+[resources]
+max_llm_tokens_per_hour = 10000000
+max_concurrent_tools = 5
+
+[capabilities]
+tools = [ "file_read", "file_list", "memory_store", "memory_recall", "agent_send", "mcp.invoke",]
+memory_read = [ "*",]
+memory_write = [ "self.*", "shared.*",]
+agent_message = [ "*",]
+
+[exec_policy]
+mode = "full"

@@ -1,0 +1,24 @@
+package t3rnel:skill@0.1.0;
+
+/// JSON payload exchanged between the host and a skill component.
+type json = string;
+
+/// Host API exposed to WASM skills. Every function is capability-gated by the
+/// skill manifest before component instantiation.
+interface host {
+  read-file: func(path: string) -> result<string, string>;
+  write-file: func(path: string, content: string) -> result<_, string>;
+  http-fetch: func(url: string) -> result<string, string>;
+  shell-exec: func(command: string) -> result<string, string>;
+  log: func(level: string, message: string);
+}
+
+/// Guest API implemented by every first-party WASM skill.
+interface guest {
+  call: func(tool: string, input: json) -> result<json, string>;
+}
+
+world t3rnel-skill {
+  import host;
+  export guest;
+}

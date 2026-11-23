@@ -1,0 +1,104 @@
+# Build output
+/target/
+**/target/
+*.rlib
+*.rmeta
+
+# Rust
+**/*.rs.bk
+Cargo.lock.bak
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Environment & secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.keystore
+secrets/
+credentials.json
+*credentials*.json
+*.tok
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Logs & runtime state
+*.log
+logs/
+.t3rnel/
+*.pid
+*.sock
+
+# Test & coverage artifacts
+tests/output/
+coverage/
+*.lcov
+.nyc_output/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Caches
+.cache/
+.turbo/
+.next/
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Generated / vendored artifacts
+artifacts/
+*.vsix
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+
+# Internal ops (never public)
+audits/
+strix_runs/
+reports/
+.content/
+bounty-events.jsonl
+HANDOVER.md
+SESSION-STATUS.md
+TASK-LEDGER.md
+NEXT-PROMPT.md
+
+# Repo-local agent config
+.agents/
+.claude/
+.devin/
+.kilo/
+.swarm/
+.serena/
+.mcp.json
+
+# Mobile / desktop build outputs
+clients/mobile/android/app/build/
+clients/mobile/ios/build/
+clients/desktop/release/
+clients/desktop/dist/
+
+# Misc
+*.orig
+*.rej
+*.bak
+*.backup
+.tmp/
+tmp/

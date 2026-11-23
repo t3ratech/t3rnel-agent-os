@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.6.4)"
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: cargo build --workspace --release
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3rnel-${{ github.event.inputs.tag }}
+          path: |
+            target/release/t3rnel
+            target/release/t3rnel-bridge*

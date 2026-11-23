@@ -1,0 +1,33 @@
+name = "frontend-builder"
+version = "0.1.0"
+description = "Cross-surface frontend builder. Implements UI for web, desktop, mobile, VS Code extension, Chrome extension, and any future surface. Not limited to React."
+author = "t3rnel"
+module = "builtin:chat"
+tags = [ "frontend", "web", "desktop", "mobile", "react-native", "expo", "ui", "vscode-extension", "chrome-extension",]
+tool_allowlist = [ "file_read", "file_write", "file_list", "shell_exec", "memory_store", "memory_recall", "agent_send", "task_claim", "task_complete",]
+
+[metadata]
+prompt_path = "prompts/frontend-builder/system.md"
+sandbox_profile = "docker_coding_workspace"
+role = "frontend_builder"
+category = "coding"
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = ""
+
+[resources]
+max_llm_tokens_per_hour = 10000000
+max_concurrent_tools = 8
+
+[capabilities]
+tools = [ "file_read", "file_write", "file_list", "shell_exec", "memory_store", "memory_recall", "agent_send", "task_claim", "task_complete", "mcp.invoke",]
+network = [ "*",]
+memory_read = [ "swarm.*", "mobile.*", "web.*", "desktop.*", "shared.*",]
+memory_write = [ "self.*", "swarm.*", "mobile.*", "web.*", "desktop.*",]
+shell = [ "npm *", "pnpm *", "npx *", "expo *", "cargo *", "vite *", "tsc *",]
+agent_message = [ "*",]
+
+[exec_policy]
+mode = "full"

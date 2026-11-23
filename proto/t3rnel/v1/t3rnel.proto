@@ -1,0 +1,415 @@
+syntax = "proto3";
+
+package t3rnel.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service Agents {
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  rpc SpawnAgent(SpawnAgentRequest) returns (Agent);
+  rpc KillAgent(KillAgentRequest) returns (KillAgentResponse);
+  rpc WatchAgents(WatchAgentsRequest) returns (stream AgentEvent);
+}
+
+service Tasks {
+  rpc CreateTask(CreateTaskRequest) returns (Task);
+  rpc GetTask(GetTaskRequest) returns (Task);
+  rpc CancelTask(CancelTaskRequest) returns (Task);
+  rpc WatchTask(WatchTaskRequest) returns (stream TaskEvent);
+}
+
+service Approvals {
+  rpc WatchApprovals(WatchApprovalsRequest) returns (stream ApprovalRequest);
+  rpc DecideApproval(DecideApprovalRequest) returns (ApprovalRecord);
+}
+
+service Files {
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  rpc ProposePatch(ProposePatchRequest) returns (PatchProposal);
+  rpc ApplyPatch(ApplyPatchRequest) returns (ApplyPatchResponse);
+}
+
+service Shell {
+  rpc Exec(ExecRequest) returns (stream ExecEvent);
+}
+
+service Telemetry {
+  rpc WatchTraces(WatchTracesRequest) returns (stream TraceEvent);
+  rpc GetMetrics(GetMetricsRequest) returns (MetricsSnapshot);
+}
+
+service CodeReview {
+  rpc StartReview(StartReviewRequest) returns (stream ReviewEvent);
+  rpc CommentReview(CommentReviewRequest) returns (ReviewComment);
+  rpc ResolveReview(ResolveReviewRequest) returns (ReviewComment);
+}
+
+service Prompts {
+  rpc ListPrompts(ListPromptsRequest) returns (ListPromptsResponse);
+  rpc GetPromptVariant(GetPromptVariantRequest) returns (PromptDocument);
+  rpc ReportPromptOutcome(ReportPromptOutcomeRequest) returns (ReportPromptOutcomeResponse);
+  rpc GetPromptWinRate(GetPromptWinRateRequest) returns (GetPromptWinRateResponse);
+}
+
+service Memory {
+  rpc QueryGraph(QueryGraphRequest) returns (QueryGraphResponse);
+  rpc WriteLesson(WriteLessonRequest) returns (WriteLessonResponse);
+  rpc PromoteSession(PromoteSessionRequest) returns (PromoteSessionResponse);
+}
+
+message ListAgentsRequest {}
+
+message ListAgentsResponse {
+  repeated Agent agents = 1;
+}
+
+message SpawnAgentRequest {
+  string manifest_toml = 1;
+}
+
+message KillAgentRequest {
+  string agent_id = 1;
+}
+
+message KillAgentResponse {
+  string agent_id = 1;
+  bool killed = 2;
+}
+
+message WatchAgentsRequest {}
+
+message Agent {
+  string id = 1;
+  string name = 2;
+  string state = 3;
+  string provider = 4;
+  string model = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp last_active = 7;
+}
+
+message AgentEvent {
+  string type = 1;
+  Agent agent = 2;
+}
+
+message CreateTaskRequest {
+  string agent_id = 1;
+  string prompt = 2;
+  map<string, string> metadata = 3;
+}
+
+message GetTaskRequest {
+  string task_id = 1;
+}
+
+message CancelTaskRequest {
+  string task_id = 1;
+  string reason = 2;
+}
+
+message WatchTaskRequest {
+  string task_id = 1;
+}
+
+message Task {
+  string id = 1;
+  string agent_id = 2;
+  string state = 3;
+  string prompt = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+message TaskEvent {
+  string type = 1;
+  Task task = 2;
+  string message = 3;
+}
+
+message WatchApprovalsRequest {
+  string agent_id = 1;
+}
+
+message ApprovalRequest {
+  string id = 1;
+  string agent_id = 2;
+  string risk = 3;
+  string action = 4;
+  string description = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message DecideApprovalRequest {
+  string approval_id = 1;
+  bool approved = 2;
+  string reason = 3;
+}
+
+message ApprovalRecord {
+  string id = 1;
+  string agent_id = 2;
+  string decision = 3;
+  string reason = 4;
+  google.protobuf.Timestamp decided_at = 5;
+}
+
+message ListFilesRequest {
+  string workspace = 1;
+  string path = 2;
+}
+
+message ListFilesResponse {
+  repeated FileEntry entries = 1;
+}
+
+message FileEntry {
+  string path = 1;
+  bool directory = 2;
+  uint64 size_bytes = 3;
+}
+
+message ReadFileRequest {
+  string workspace = 1;
+  string path = 2;
+}
+
+message ReadFileResponse {
+  string path = 1;
+  bytes content = 2;
+}
+
+message ProposePatchRequest {
+  string workspace = 1;
+  string unified_diff = 2;
+}
+
+message PatchProposal {
+  string id = 1;
+  string unified_diff = 2;
+  repeated string touched_paths = 3;
+}
+
+message ApplyPatchRequest {
+  string proposal_id = 1;
+  repeated int32 accepted_hunk_ids = 2;
+  string workspace = 3;
+  string unified_diff = 4;
+}
+
+message ApplyPatchResponse {
+  string proposal_id = 1;
+  bool applied = 2;
+  repeated string touched_paths = 3;
+}
+
+message ExecRequest {
+  string workspace = 1;
+  string command = 2;
+  repeated string args = 3;
+  map<string, string> env = 4;
+}
+
+message ExecEvent {
+  string stream = 1;
+  bytes data = 2;
+  int32 exit_code = 3;
+}
+
+message WatchTracesRequest {
+  string task_id = 1;
+}
+
+message TraceEvent {
+  string trace_id = 1;
+  string span_id = 2;
+  string name = 3;
+  map<string, string> attributes = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+message GetMetricsRequest {}
+
+message MetricsSnapshot {
+  double cost_usd = 1;
+  uint64 tokens_in = 2;
+  uint64 tokens_out = 3;
+  uint64 active_agents = 4;
+}
+
+message ReviewTarget {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    LOCAL_DIFF = 1;
+    LOCAL_BRANCH = 2;
+    GITHUB_PR = 3;
+    CODEBASE_PATH = 4;
+  }
+  Kind kind = 1;
+  string value = 2;
+}
+
+message StartReviewRequest {
+  ReviewTarget target = 1;
+  map<string, string> metadata = 2;
+}
+
+message ReviewLocation {
+  string file = 1;
+  uint32 start_line = 2;
+  uint32 end_line = 3;
+}
+
+message ReviewSuggestion {
+  string tool = 1;
+  string patch = 2;
+}
+
+message ReviewFinding {
+  string severity = 1;
+  string category = 2;
+  string message = 3;
+  ReviewLocation location = 4;
+  ReviewSuggestion suggestion = 5;
+}
+
+message ReviewReport {
+  ReviewTarget target = 1;
+  string summary = 2;
+  repeated ReviewFinding findings = 3;
+}
+
+message ReviewEvent {
+  string review_id = 1;
+  string type = 2;
+  ReviewReport report = 3;
+  ReviewFinding finding = 4;
+  string message = 5;
+}
+
+message CommentReviewRequest {
+  string review_id = 1;
+  string finding_id = 2;
+  string body = 3;
+}
+
+message ResolveReviewRequest {
+  string review_id = 1;
+  string finding_id = 2;
+  string reason = 3;
+}
+
+message ReviewComment {
+  string id = 1;
+  string review_id = 2;
+  string finding_id = 3;
+  string body = 4;
+  bool resolved = 5;
+}
+
+message ListPromptsRequest {}
+
+message ListPromptsResponse {
+  repeated PromptDocument prompts = 1;
+}
+
+message GetPromptVariantRequest {
+  string task_id = 1;
+  string name = 2;
+  repeated string variants = 3;
+}
+
+message PromptDocument {
+  string id = 1;
+  string role = 2;
+  string name = 3;
+  string variant = 4;
+  string version = 5;
+  string sha256 = 6;
+  string body = 7;
+  repeated string model_hints = 8;
+  string eval_set = 9;
+  repeated string parents = 10;
+}
+
+message ReportPromptOutcomeRequest {
+  string prompt_id = 1;
+  string variant = 2;
+  string experiment_id = 3;
+  string outcome = 4; // "win", "loss", "draw"
+  double metric_value = 5;
+}
+
+message ReportPromptOutcomeResponse {
+  bool success = 1;
+}
+
+message GetPromptWinRateRequest {
+  string prompt_id = 1;
+  string variant = 2;
+}
+
+message GetPromptWinRateResponse {
+  uint64 total = 1;
+  uint64 wins = 2;
+  uint64 losses = 3;
+  uint64 draws = 4;
+  double win_rate = 5;
+  double avg_metric = 6;
+}
+
+message QueryGraphRequest {
+  string source = 1;
+  string relation = 2;
+  string target = 3;
+  uint32 max_depth = 4;
+}
+
+message GraphMatch {
+  Entity source = 1;
+  Relation relation = 2;
+  Entity target = 3;
+}
+
+message Entity {
+  string id = 1;
+  string entity_type = 2;
+  string name = 3;
+  string properties_json = 4;
+}
+
+message Relation {
+  string id = 1;
+  string source = 2;
+  string relation_type = 3;
+  string target = 4;
+  double confidence = 5;
+}
+
+message QueryGraphResponse {
+  repeated GraphMatch matches = 1;
+}
+
+message WriteLessonRequest {
+  string task_id = 1;
+  string summary = 2;
+  string outcome = 3;
+  string source_agent = 4;
+  string approval_reason = 5;
+}
+
+message WriteLessonResponse {
+  string lesson_id = 1;
+  bool success = 2;
+}
+
+message PromoteSessionRequest {
+  string session_id = 1;
+  string target_store = 2; // "semantic" or "knowledge"
+}
+
+message PromoteSessionResponse {
+  bool success = 1;
+  string promoted_id = 2;
+}

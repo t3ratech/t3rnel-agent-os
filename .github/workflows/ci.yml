@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --workspace --all-targets
+      - name: Build
+        run: cargo build --workspace
+      - name: Unit tests
+        run: cargo test --workspace --lib
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Shell lint
+        run: shellcheck -S error t3rnel-services.sh
+      - name: Secret scan
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest detect --source /repo --no-git -v || true

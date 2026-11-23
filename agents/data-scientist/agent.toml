@@ -1,0 +1,18 @@
+name = "data-scientist"
+version = "0.1.0"
+description = "Data scientist. Analyzes datasets, builds models, creates visualizations, performs statistical analysis."
+author = "t3rnel"
+module = "builtin:chat"
+role = "data_scientist"
+tags = [ "data", "analysis", "machine-learning", "visualization", "statistics",]
+
+[metadata]
+category = "analysis"
+
+[model]
+provider = "default"
+model = "default"
+api_key_env = ""
+
+[exec_policy]
+mode = "full"

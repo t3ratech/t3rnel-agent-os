@@ -1,0 +1,203 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/t3rnel-types",
+    "crates/t3rnel-memory",
+    "crates/t3rnel-runtime",
+    "crates/t3rnel-prompts",
+    "crates/t3rnel-eval",
+    "crates/t3rnel-wire",
+    "crates/t3rnel-api",
+    "crates/t3rnel-kernel",
+    "crates/t3rnel-cli",
+    "crates/t3rnel-channels",
+    "crates/t3rnel-migrate",
+    "crates/t3rnel-skills",
+    "crates/t3rnel-hands",
+    "crates/t3rnel-extensions",
+    "crates/t3rnel-mcp",
+    "bridge",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.6.4"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/t3ratech/t3rnel"
+rust-version = "1.82"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+async-stream = "0.3"
+
+# Metrics
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+rmp-serde = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Concurrency
+dashmap = "6"
+crossbeam = "0.8"
+
+# Logging / Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.27"
+opentelemetry = "0.26"
+opentelemetry-otlp = "0.26"
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+
+# IDs
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+# Database
+rusqlite = { version = "0.39", features = ["bundled", "serde_json"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+
+# HTTP client (for LLM drivers)
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls", "gzip", "deflate", "brotli"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+# Async trait
+async-trait = "0.1"
+
+# Base64
+base64 = "0.22"
+
+# Bytes
+bytes = "1"
+
+# Futures
+futures = "0.3"
+prost = "0.13"
+prost-types = "0.13"
+tonic = { version = "0.12", features = ["transport"] }
+tonic-build = "0.12"
+tonic-reflection = "0.12"
+tonic-web = "0.12"
+protoc-bin-vendored = "3"
+
+# WebSocket client (for Discord/Slack gateway)
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+url = "2"
+
+# WASM sandbox
+wasmtime = "44.0.2"
+wasmtime-wasi = "44.0.2"
+
+# HTTP server (for API daemon)
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "compression-br"] }
+
+# Home directory resolution
+dirs = "6"
+
+# YAML parsing
+serde_yaml = "0.9"
+
+# JSON5 parsing
+json5 = "0.4"
+
+# Directory walking
+walkdir = "2"
+
+# Security
+sha2 = "0.10"
+sha1 = "0.10"
+aes = "0.9"
+cbc = "0.2"
+hmac = "0.12"
+hex = "0.4"
+subtle = "2"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+
+# Rate limiting
+governor = "0.10"
+
+# Interactive CLI
+ratatui = "0.30"
+colored = "3"
+
+# Encryption
+aes-gcm = "0.10"
+argon2 = "0.5"
+
+# HTML entity decoding
+html-escape = "0.2"
+
+# Lightweight regex
+regex-lite = "0.1"
+
+# MCP SDK (official Rust implementation)
+rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+
+# Socket options (SO_REUSEADDR)
+socket2 = "0.5"
+
+# Zip archive extraction
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+# Email (SMTP + IMAP)
+lettre = { version = "0.11.22", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
+imap = "3.0.0-alpha.15"
+native-tls = { version = "0.2", features = ["vendored"] }
+mailparse = "0.16"
+
+# MQTT client
+rumqttc = { version = "0.25", default-features = false, features = ["use-native-tls"] }
+
+# OpenSSL (vendored = statically compiled, no runtime libssl dependency on Linux)
+openssl = { version = "0.10", features = ["vendored"] }
+
+# Testing
+tokio-test = "0.4"
+tempfile = "3"
+
+# Debug symbols are off by default.
+#
+# A full-symbol debug build of the CLI links to roughly 966MB and needs several
+# gigabytes of linker memory. On this workstation that exhausted RAM and the
+# kernel OOM-killed the desktop session — shell, editor and browser together —
+# so the cost of symbols is not slower builds, it is losing the machine.
+#
+# Backtraces still carry frames, just not line numbers. Set
+# CARGO_PROFILE_DEV_DEBUG=line-tables-only for a session that needs them; that
+# level restores line numbers at a fraction of the size.
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3
+
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 8
+opt-level = 2
+strip = false
