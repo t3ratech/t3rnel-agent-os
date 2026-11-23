@@ -24,7 +24,7 @@ members = [
 version = "0.6.4"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/t3ratech/t3rnel"
+repository = "https://github.com/t3ratech/t3rnel-agent-os"
 rust-version = "1.82"
 
 [workspace.dependencies]
