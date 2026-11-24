@@ -1,0 +1,821 @@
+syntax = "proto3";
+
+// T3rnel plugin host contract — draft (pre-freeze).
+//
+// This file is the versioned agreement between the T3rnel core and every
+// plugin (skill, hand, agent, connector, mcp-extension, pack). It is
+// additive-only within a major version: `buf breaking` gates every change
+// once version 1 is frozen (after the Research and Trading reference plugins
+// pass parity — see docs/sections/17-implementation-guide.md §9.1).
+//
+// Shape (04 §14.1): the core is the only server of the host services below
+// (one gRPC stream, plugin -> core). The plugin serves the callback service
+// `PluginCallbacks` (tool calls, route requests, schedule ticks, events, view
+// requests, health) on the second stream (core -> plugin). A sandboxed plugin
+// holds no socket; both streams are inherited, pre-connected descriptors.
+//
+// Secrets never cross this contract: plugins declare secret *names* in their
+// manifest and the credential-brokering proxy resolves them in flight
+// (05 §14.1). Every message that could carry content is bounded by the core.
+
+package t3rnel.plugin.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// ---------------------------------------------------------------------------
+// Shared types
+// ---------------------------------------------------------------------------
+
+// Plugin identity presented during handshake and on every call.
+message PluginIdentity {
+  // Manifest plugin id, e.g. "org.t3rnel.vlc-bridge".
+  string id = 1;
+  // Package version (semver).
+  string version = 2;
+  // Manifest schema version the plugin was built against.
+  string manifest_version = 3;
+  // SHA-256 (lowercase hex) of the manifest the core approved.
+  string manifest_digest = 4;
+}
+
+// Data classification of content crossing the contract (05 §14.10).
+enum DataClass {
+  DATA_CLASS_UNSPECIFIED = 0;
+  DATA_CLASS_PUBLIC = 1;
+  DATA_CLASS_PLUGIN_PRIVATE = 2;
+  DATA_CLASS_PERSONAL = 3;
+  DATA_CLASS_FINANCIAL = 4;
+  DATA_CLASS_CREDENTIAL_ADJACENT = 5;
+  // Default for anything unlabelled; never leaves the machine.
+  DATA_CLASS_UNCLASSIFIED = 6;
+}
+
+// Taint label attached to content that came from outside the trust boundary.
+message Taint {
+  // Origin, e.g. "plugin:org.example.x", "web", "mail", "route:/api/x".
+  string source = 1;
+  // True when the content is untrusted (the common case for plugin output).
+  bool untrusted = 2;
+  // Data classes carried by this content.
+  repeated DataClass data_classes = 3;
+  // Hashes of the records this content was derived from (memory taint).
+  repeated string derived_from = 4;
+}
+
+// A bounded byte/string payload. `sha256` lets the core store references and
+// hashes instead of content where labels apply (05 §14.2, 04 §15.1).
+message Payload {
+  bytes data = 1;
+  // SHA-256 of `data`, lowercase hex; required when data is present.
+  string sha256 = 2;
+  // Content type hint, e.g. "application/json", "text/plain".
+  string content_type = 3;
+  // Taint carried by this payload.
+  Taint taint = 4;
+}
+
+// Risk class of a capability (04 §2). The manifest cannot lower a class
+// below the reference table in bridge/src/capability.rs.
+enum RiskClass {
+  RISK_CLASS_UNSPECIFIED = 0;
+  RISK_CLASS_READ = 1;
+  RISK_CLASS_WRITE_REVERSIBLE = 2;
+  RISK_CLASS_WRITE_IRREVERSIBLE = 3;
+  RISK_CLASS_EXTERNAL_EFFECT = 4;
+  RISK_CLASS_FINANCIAL = 5;
+  RISK_CLASS_SYSTEM = 6;
+}
+
+// ---------------------------------------------------------------------------
+// http — outbound requests through the credential-brokering proxy
+// ---------------------------------------------------------------------------
+
+// One HTTP request the plugin asks the core to make on its behalf.
+message HttpRequest {
+  PluginIdentity plugin = 1;
+  // Absolute URL, http or https. The proxy enforces the manifest host,
+  // method and path allowlist before anything is sent.
+  string url = 2;
+  string method = 3;
+  // Headers the plugin wants. Authorization, Host, Cookie and proxy headers
+  // are stripped/rejected by the proxy; the plugin can never supply them.
+  map<string, string> headers = 4;
+  Payload body = 5;
+  // Per-request timeout override in milliseconds (bounded by core policy).
+  uint32 timeout_ms = 6;
+  // When true the response body is returned inline; when false only
+  // status/headers/sha256 are returned (large or labelled responses).
+  bool return_body = 7;
+}
+
+message HttpResponse {
+  uint32 status = 1;
+  map<string, string> headers = 2;
+  // Body present only when requested and within the response cap. The proxy
+  // scans it for echoed secrets and replaces them with secret references
+  // before this ever reaches the plugin (05 §14.5).
+  Payload body = 3;
+  // Redirect targets the proxy declined to follow (audit visibility).
+  repeated string blocked_redirects = 4;
+  // Audit record id of this call.
+  string audit_id = 5;
+}
+
+service Http {
+  // Perform one proxied request. Authentication injection and signing are
+  // applied by the core per the manifest `permissions.auth` entry bound to
+  // this host/method/path; the plugin sends unsigned requests only.
+  rpc Request(HttpRequest) returns (HttpResponse);
+}
+
+// ---------------------------------------------------------------------------
+// storage — per-plugin namespaced key-value, SQL and blobs
+// ---------------------------------------------------------------------------
+
+// Namespaced key-value access under the plugin's own storage directory.
+message KvGetRequest {
+  PluginIdentity plugin = 1;
+  string namespace = 2; // e.g. "default"; validated, no path separators
+  string key = 3;
+}
+message KvGetResponse {
+  bool found = 1;
+  Payload value = 2;
+  google.protobuf.Timestamp updated_at = 3;
+}
+message KvPutRequest {
+  PluginIdentity plugin = 1;
+  string namespace = 2;
+  string key = 3;
+  Payload value = 4;
+}
+message KvDeleteRequest {
+  PluginIdentity plugin = 1;
+  string namespace = 2;
+  string key = 3;
+}
+message KvDeleteResponse { bool deleted = 1; }
+message KvListRequest {
+  PluginIdentity plugin = 1;
+  string namespace = 2;
+  string prefix = 3; // optional
+  uint32 limit = 4;  // 0 = core default cap
+}
+message KvListResponse {
+  repeated string keys = 1;
+  bool truncated = 2;
+}
+message KvDeleteNamespaceRequest {
+  PluginIdentity plugin = 1;
+  string namespace = 2;
+}
+message KvDeleteNamespaceResponse { uint64 deleted = 1; }
+
+// SQL access: the plugin's own SQLite database in <plugin dir>/data/.
+// Migrations are host-run, transactional and snapshotted before each run.
+message SqlExecRequest {
+  PluginIdentity plugin = 1;
+  // Statements separated by ';' is NOT assumed; use SqlExecBatch for that.
+  string statement = 1;
+  // Bound parameters, positional.
+  repeated SqlValue params = 2;
+  uint32 timeout_ms = 3;
+}
+message SqlExecBatchRequest {
+  PluginIdentity plugin = 1;
+  repeated SqlStatement statements = 2; // applied in one transaction
+}
+message SqlStatement {
+  string sql = 1;
+  repeated SqlValue params = 2;
+}
+message SqlValue {
+  oneof kind {
+    string text = 1;
+    int64 integer = 2;
+    double real = 3;
+    bool boolean = 4;
+    bytes blob = 5;
+    bool null_value = 6;
+  }
+}
+message SqlRow {
+  // Column name -> value, in statement order preserved by `columns`.
+  repeated string columns = 1;
+  repeated SqlValue values = 2;
+}
+message SqlResult {
+  repeated string columns = 1;
+  repeated SqlRow rows = 2;
+  // Rows affected for non-SELECT statements.
+  uint64 rows_affected = 3;
+  // Last inserted rowid for INSERT statements.
+  int64 last_insert_rowid = 4;
+}
+message SqlExecResponse {
+  SqlResult result = 1;
+}
+message SqlExecBatchResponse {
+  repeated SqlResult results = 1;
+}
+
+// Blob storage for large/binary content; content-addressed by sha256.
+message BlobPutRequest {
+  PluginIdentity plugin = 1;
+  string namespace = 2;
+  Payload value = 3;
+}
+message BlobPutResponse { string sha256 = 1; uint64 size = 2; }
+message BlobGetRequest {
+  PluginIdentity plugin = 1;
+  string namespace = 2;
+  string sha256 = 3;
+}
+message BlobGetResponse {
+  bool found = 1;
+  Payload value = 2;
+}
+
+// Migrations the plugin ships. The core runs them host-side inside a
+// transaction after taking a storage snapshot.
+message Migration {
+  // Monotonic version number.
+  uint32 version = 1;
+  // Human description.
+  string description = 2;
+  // SQL statements applied atomically at this version.
+  repeated string statements = 3;
+}
+message MigrateRequest {
+  PluginIdentity plugin = 1;
+  repeated Migration migrations = 2;
+}
+message MigrateResponse {
+  // Highest applied version after this call.
+  uint32 current_version = 1;
+  // Versions applied by this call.
+  repeated uint32 applied = 2;
+  // Path of the pre-migration snapshot (for rollback support).
+  string snapshot_path = 3;
+}
+
+service Storage {
+  rpc KvGet(KvGetRequest) returns (KvGetResponse);
+  rpc KvPut(KvPutRequest) returns (google.protobuf.Empty);
+  rpc KvDelete(KvDeleteRequest) returns (KvDeleteResponse);
+  rpc KvList(KvListRequest) returns (KvListResponse);
+  rpc KvDeleteNamespace(KvDeleteNamespaceRequest) returns (KvDeleteNamespaceResponse);
+  rpc SqlExec(SqlExecRequest) returns (SqlExecResponse);
+  rpc SqlExecBatch(SqlExecBatchRequest) returns (SqlExecBatchResponse);
+  rpc BlobPut(BlobPutRequest) returns (BlobPutResponse);
+  rpc BlobGet(BlobGetRequest) returns (BlobGetResponse);
+  rpc Migrate(MigrateRequest) returns (MigrateResponse);
+}
+
+// ---------------------------------------------------------------------------
+// memory — the plugin's own namespace plus granted shared namespaces
+// ---------------------------------------------------------------------------
+
+message MemoryRecord {
+  string key = 1;
+  Payload content = 2;
+  // Namespace: the plugin's own id, or a shared namespace it was granted.
+  string namespace = 3;
+}
+message MemoryWriteRequest {
+  PluginIdentity plugin = 1;
+  // Must be the plugin's own namespace unless the manifest grants more.
+  string namespace = 2;
+  string key = 3;
+  Payload content = 4;
+  // Data classes the writer asserts; core unions with existing labels and
+  // may only widen, never narrow (05 §14.9).
+  repeated DataClass data_classes = 5;
+}
+message MemoryReadRequest {
+  PluginIdentity plugin = 1;
+  string namespace = 2;
+  string key = 3;
+}
+message MemoryReadResponse {
+  bool found = 1;
+  MemoryRecord record = 2;
+}
+message MemoryQueryRequest {
+  PluginIdentity plugin = 1;
+  string namespace = 2;
+  string query = 3;   // free-text or structured per core memory API
+  uint32 limit = 4;
+}
+message MemoryQueryResponse {
+  repeated MemoryRecord records = 1;
+}
+
+service Memory {
+  rpc Write(MemoryWriteRequest) returns (google.protobuf.Empty);
+  rpc Read(MemoryReadRequest) returns (MemoryReadResponse);
+  rpc Query(MemoryQueryRequest) returns (MemoryQueryResponse);
+}
+
+// ---------------------------------------------------------------------------
+// tools — register capabilities agents may call
+// ---------------------------------------------------------------------------
+
+// A tool the plugin offers. Calls arrive on the callback stream
+// (PluginCallbacks.CallTool); the core applies grants, approvals and taint.
+message ToolDef {
+  // Capability id "<domain>.<verb>"; risk class may not be below the
+  // reference table for that name.
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  // JSON Schema for arguments.
+  string input_schema_json = 4;
+  RiskClass risk_class = 5;
+  // Data classes the tool's output may carry (maximum it can inject).
+  repeated DataClass output_data_classes = 6;
+}
+message RegisterToolsRequest {
+  PluginIdentity plugin = 1;
+  repeated ToolDef tools = 2;
+}
+message RegisterToolsResponse {
+  // Ids accepted. Rejected ids appear in `rejected` with reasons.
+  repeated string accepted = 1;
+  map<string, string> rejected = 2;
+}
+message UnregisterToolsRequest {
+  PluginIdentity plugin = 1;
+  repeated string ids = 2;
+}
+message UnregisterToolsResponse { repeated string removed = 1; }
+
+service Tools {
+  rpc Register(RegisterToolsRequest) returns (RegisterToolsResponse);
+  rpc Unregister(UnregisterToolsRequest) returns (UnregisterToolsResponse);
+}
+
+// ---------------------------------------------------------------------------
+// routes — mount HTTP handlers under /api/...
+// ---------------------------------------------------------------------------
+
+// A route the plugin serves. The core authenticates, rate-limits and caps
+// bodies before forwarding to PluginCallbacks.HandleRoute.
+message RouteDef {
+  // Path the plugin owns, e.g. "/api/research/{id}". Plugins own their
+  // paths; two plugins claiming one path means the second install fails.
+  string path = 1;
+  // HTTP methods, e.g. ["GET", "POST"].
+  repeated string methods = 2;
+  // Maximum request/response body sizes in bytes.
+  uint32 max_request_bytes = 3;
+  uint32 max_response_bytes = 4;
+}
+message MountRoutesRequest {
+  PluginIdentity plugin = 1;
+  repeated RouteDef routes = 2;
+}
+message MountRoutesResponse {
+  repeated string mounted = 1;
+  map<string, string> rejected = 2;
+}
+message UnmountRoutesRequest {
+  PluginIdentity plugin = 1;
+  repeated string paths = 2; // empty = all of this plugin's routes
+}
+message UnmountRoutesResponse { repeated string removed = 1; }
+
+service Routes {
+  rpc Mount(MountRoutesRequest) returns (MountRoutesResponse);
+  rpc Unmount(UnmountRoutesRequest) returns (UnmountRoutesResponse);
+}
+
+// ---------------------------------------------------------------------------
+// schedule — cron, interval and one-shot jobs; the core calls the plugin
+// ---------------------------------------------------------------------------
+
+message ScheduleSpec {
+  oneof kind {
+    // Standard 5-field cron expression (minute hour dom month dow).
+    string cron = 1;
+    // Fixed interval in seconds.
+    uint32 interval_seconds = 2;
+    // Run once at a timestamp.
+    google.protobuf.Timestamp run_at = 3;
+  }
+}
+message ScheduleJob {
+  // Plugin-chosen unique id within this plugin.
+  string job_id = 1;
+  ScheduleSpec spec = 2;
+  // Free-form label for the UI/audit.
+  string description = 3;
+  // Missed-run policy: skip | run_once | run_all (bounded).
+  string missed_run_policy = 4;
+}
+message ScheduleAddRequest {
+  PluginIdentity plugin = 1;
+  repeated ScheduleJob jobs = 2;
+}
+message ScheduleAddResponse {
+  repeated string added = 1;
+  map<string, string> rejected = 2;
+}
+message ScheduleRemoveRequest {
+  PluginIdentity plugin = 1;
+  repeated string job_ids = 2; // empty = all
+}
+message ScheduleRemoveResponse { repeated string removed = 1; }
+message ScheduleListRequest { PluginIdentity plugin = 1; }
+message ScheduleListResponse { repeated ScheduleJob jobs = 1; }
+
+service Schedule {
+  rpc Add(ScheduleAddRequest) returns (ScheduleAddResponse);
+  rpc Remove(ScheduleRemoveRequest) returns (ScheduleRemoveResponse);
+  rpc List(ScheduleListRequest) returns (ScheduleListResponse);
+}
+
+// ---------------------------------------------------------------------------
+// events — namespaced bus topics; subscriptions are declared, emissions are
+// checked against declared topics (deliveries arrive via OnEvent callback)
+// ---------------------------------------------------------------------------
+
+message EventSubscribeRequest {
+  PluginIdentity plugin = 1;
+  // Topics this plugin wants delivered, e.g. "trade.fill", "core.approval.*".
+  repeated string topics = 2;
+}
+message EventSubscribeResponse {
+  // Subscription ids granted (subset of requested topics).
+  repeated string subscriptions = 1;
+}
+message EventEmitRequest {
+  PluginIdentity plugin = 1;
+  // Topic must be namespaced under the plugin id or explicitly declared.
+  string topic = 2;
+  // Event payload.
+  Payload payload = 3;
+  // Optional correlation id for audit.
+  string correlation_id = 4;
+}
+message EventEmitResponse {
+  string event_id = 1;
+  uint64 delivered = 2;
+}
+message EventUnsubscribeRequest {
+  PluginIdentity plugin = 1;
+  repeated string subscriptions = 2;
+}
+message EventUnsubscribeResponse { repeated string removed = 1; }
+
+service Events {
+  rpc Subscribe(EventSubscribeRequest) returns (EventSubscribeResponse);
+  rpc Unsubscribe(EventUnsubscribeRequest) returns (EventUnsubscribeResponse);
+  rpc Emit(EventEmitRequest) returns (EventEmitResponse);
+}
+
+// ---------------------------------------------------------------------------
+// approval — request a human or biometric decision with evidence
+// ---------------------------------------------------------------------------
+
+message ApprovalEvidence {
+  // What will happen, in plain words, shown to the approver.
+  string summary = 1;
+  // Structured evidence (e.g. the proposed order, the diff, the message).
+  Payload detail = 2;
+  // Capability being approved, e.g. "trade.order.place".
+  string capability = 3;
+  // Risk class driving the approval level.
+  RiskClass risk_class = 4;
+  // References to audit records motivating the request.
+  repeated string audit_refs = 5;
+}
+message RequestApprovalRequest {
+  PluginIdentity plugin = 1;
+  ApprovalEvidence evidence = 2;
+  // Max time to wait for a decision, milliseconds.
+  uint32 timeout_ms = 3;
+  // "human" (dashboard/inbox) or "biometric" (enrolled mobile device).
+  string channel = 4;
+}
+message ApprovalDecision {
+  // "approved" | "denied" | "expired" | "cancelled"
+  string decision = 1;
+  // Who decided: "user:<id>", "biometric:<device>", or "policy:<rule>".
+  string decided_by = 2;
+  google.protobuf.Timestamp decided_at = 3;
+  // Optional approver note.
+  string note = 4;
+  // Audit record id of the decision.
+  string audit_id = 5;
+}
+
+service Approval {
+  // Blocks until decided, expired or timed out. The plugin cannot approve
+  // itself; decisions come only from a human channel or standing policy.
+  rpc Request(RequestApprovalRequest) returns (ApprovalDecision);
+}
+
+// ---------------------------------------------------------------------------
+// llm — model completion through the core's provider policy
+// ---------------------------------------------------------------------------
+
+message LlmCompleteRequest {
+  PluginIdentity plugin = 1;
+  // Prompt text. Untrusted/plugin content must be marked via `taint`.
+  string prompt = 2;
+  // System prompt, if any (subject to the same provider policy).
+  string system = 3;
+  // Model class: "local" | "no-retention" | "standard". The core maps to a
+  // provider under the user's policy; plugins never see provider keys.
+  string model_class = 4;
+  // Maximum data classes this call may carry (05 §14.10). The core refuses
+  // the call if the assembled content exceeds provider policy.
+  repeated DataClass data_classes = 5;
+  // Sampling parameters (bounded by core).
+  double temperature = 6;
+  uint32 max_tokens = 7;
+  uint32 timeout_ms = 8;
+  Taint taint = 9;
+}
+message LlmCompleteResponse {
+  string text = 1;
+  // Model class actually used (may be downgraded by policy).
+  string model_class_used = 2;
+  uint32 tokens_in = 3;
+  uint32 tokens_out = 4;
+  // Audit record id.
+  string audit_id = 5;
+}
+
+service Llm {
+  rpc Complete(LlmCompleteRequest) returns (LlmCompleteResponse);
+}
+
+// ---------------------------------------------------------------------------
+// sentinel — report findings; read own canary status
+// ---------------------------------------------------------------------------
+
+enum FindingSeverity {
+  FINDING_SEVERITY_UNSPECIFIED = 0;
+  FINDING_SEVERITY_INFO = 1;
+  FINDING_SEVERITY_LOW = 2;
+  FINDING_SEVERITY_MEDIUM = 3;
+  FINDING_SEVERITY_HIGH = 4;
+  FINDING_SEVERITY_CRITICAL = 5;
+}
+message ReportFindingRequest {
+  PluginIdentity plugin = 1;
+  FindingSeverity severity = 2;
+  // Machine-readable finding kind, e.g. "secret-canary-seen",
+  // "policy-violation", "anomaly".
+  string kind = 3;
+  // Human-readable detail (must never contain secret values).
+  string detail = 4;
+  // References to evidence (audit ids, hashes).
+  repeated string evidence_refs = 5;
+}
+message ReportFindingResponse { string finding_id = 1; }
+message CanaryStatusRequest { PluginIdentity plugin = 1; }
+message CanaryStatusResponse {
+  // Number of live canary credentials issued to this plugin.
+  uint32 canaries_issued = 1;
+  // Whether any canary has been observed outside the proxy (a breach).
+  bool canary_breach_detected = 2;
+}
+
+service Sentinel {
+  rpc ReportFinding(ReportFindingRequest) returns (ReportFindingResponse);
+  rpc CanaryStatus(CanaryStatusRequest) returns (CanaryStatusResponse);
+}
+
+// ---------------------------------------------------------------------------
+// ui — declare views and widgets as data; optional signed web bundle
+// ---------------------------------------------------------------------------
+
+// A view/widget declaration. The core renders it in a sandboxed frame with
+// a CSP and a message bridge; interactive content arrives via view requests.
+message ViewDef {
+  // Unique view id within the plugin.
+  string view_id = 1;
+  string title = 2;
+  // "data" renders a JSON-described widget tree; "web" serves a signed
+  // static bundle from the plugin package.
+  string kind = 3;
+  // For kind="data": JSON describing the widget tree.
+  string spec_json = 4;
+  // For kind="web": path inside the plugin package.
+  string bundle_path = 5;
+  // Capability ids this view may invoke through the bridge.
+  repeated string allowed_capabilities = 6;
+}
+message DeclareViewsRequest {
+  PluginIdentity plugin = 1;
+  repeated ViewDef views = 2;
+}
+message DeclareViewsResponse {
+  repeated string declared = 1;
+  map<string, string> rejected = 2;
+}
+message RemoveViewsRequest {
+  PluginIdentity plugin = 1;
+  repeated string view_ids = 2; // empty = all
+}
+message RemoveViewsResponse { repeated string removed = 1; }
+
+service Ui {
+  rpc DeclareViews(DeclareViewsRequest) returns (DeclareViewsResponse);
+  rpc RemoveViews(RemoveViewsRequest) returns (RemoveViewsResponse);
+}
+
+// ---------------------------------------------------------------------------
+// agents — register agents and hands; spawn them with granted capabilities
+// ---------------------------------------------------------------------------
+
+// An agent/hand definition the plugin contributes.
+message AgentDef {
+  // Unique id within the plugin, e.g. "trader-scalper".
+  string agent_id = 1;
+  string name = 2;
+  string description = 3;
+  // Capability ids this agent may use; the core intersects with grants.
+  repeated string capabilities = 4;
+  // Declarative prompt/skill bundle reference (for hands).
+  string prompt_bundle = 5;
+}
+message RegisterAgentsRequest {
+  PluginIdentity plugin = 1;
+  repeated AgentDef agents = 2;
+}
+message RegisterAgentsResponse {
+  repeated string registered = 1;
+  map<string, string> rejected = 2;
+}
+message SpawnAgentRequest {
+  PluginIdentity plugin = 1;
+  string agent_id = 2;
+  // Optional mission/task text.
+  string mission = 3;
+}
+message SpawnAgentResponse {
+  // Core agent id the spawn produced.
+  string spawned_agent_id = 1;
+}
+message RemoveAgentsRequest {
+  PluginIdentity plugin = 1;
+  repeated string agent_ids = 2;
+}
+message RemoveAgentsResponse { repeated string removed = 1; }
+
+service Agents {
+  rpc RegisterAgents(RegisterAgentsRequest) returns (RegisterAgentsResponse);
+  rpc SpawnAgent(SpawnAgentRequest) returns (SpawnAgentResponse);
+  rpc RemoveAgents(RemoveAgentsRequest) returns (RemoveAgentsResponse);
+}
+
+// ---------------------------------------------------------------------------
+// notify + audit
+// ---------------------------------------------------------------------------
+
+message NotifyRequest {
+  PluginIdentity plugin = 1;
+  // "info" | "warning" | "action-required"
+  string level = 2;
+  string title = 3;
+  string body = 4;
+  // Optional deep link into the dashboard.
+  string link = 5;
+}
+message NotifyResponse { string notice_id = 1; }
+
+service Notify {
+  rpc Send(NotifyRequest) returns (NotifyResponse);
+}
+
+// Append a structured audit entry. Only references and hashes — never
+// content or secrets (05 §14.2).
+message AuditEntry {
+  PluginIdentity plugin = 1;
+  // Event kind, e.g. "tool.call", "http.request", "approval.request".
+  string kind = 2;
+  // Subject reference, e.g. capability id, URL host, route path.
+  string subject = 3;
+  // Outcome: "ok" | "denied" | "error" | "blocked".
+  string outcome = 4;
+  // Content hash when the entry refers to a payload.
+  string payload_sha256 = 5;
+  // Taint of the subject matter.
+  Taint taint = 6;
+  // Free-form structured metadata (references only).
+  string metadata_json = 7;
+}
+message AuditAppendRequest { AuditEntry entry = 1; }
+message AuditAppendResponse { string audit_id = 1; }
+
+service Audit {
+  rpc Append(AuditAppendRequest) returns (AuditAppendResponse);
+}
+
+// ---------------------------------------------------------------------------
+// PluginCallbacks — implemented BY the plugin, called BY the core
+// ---------------------------------------------------------------------------
+
+// A capability call routed to the plugin. The core has already applied
+// grants, approvals and taint; the plugin performs the effect and reports.
+message ToolCallRequest {
+  // Core-assigned call id; echoed back for correlation.
+  string call_id = 1;
+  string tool_id = 2;
+  // Arguments as JSON.
+  string arguments_json = 3;
+  // The agent/mission that triggered the call.
+  string caller = 4;
+  // Taint of the inputs.
+  Taint taint = 5;
+  google.protobuf.Timestamp deadline = 6;
+}
+message ToolCallResponse {
+  // "ok" | "error" | "denied-by-plugin"
+  string status = 1;
+  Payload result = 2;
+  // Error detail when status != "ok" (must not contain secrets).
+  string error = 3;
+}
+
+// An HTTP request for a mounted route.
+message RouteRequest {
+  string request_id = 1;
+  string method = 2;
+  // Path including query string.
+  string path = 3;
+  map<string, string> headers = 4;
+  Payload body = 5;
+  // Authenticated principal the core resolved (never credentials).
+  string principal = 6;
+}
+message RouteResponse {
+  uint32 status = 1;
+  map<string, string> headers = 2;
+  Payload body = 3;
+}
+
+// A schedule job firing.
+message ScheduleTickRequest {
+  string job_id = 1;
+  string description = 2;
+  google.protobuf.Timestamp scheduled_at = 3;
+  google.protobuf.Timestamp fired_at = 4;
+}
+message ScheduleTickResponse {
+  // "ok" | "error"; errors are retried per missed-run policy.
+  string status = 1;
+  string error = 2;
+}
+
+// A subscribed event delivery.
+message EventDelivery {
+  string event_id = 1;
+  string topic = 2;
+  string source_plugin = 3;
+  Payload payload = 4;
+  google.protobuf.Timestamp emitted_at = 5;
+}
+message EventAck { string event_id = 1; }
+
+// A request to render a declared view.
+message ViewRequest {
+  string view_id = 1;
+  // Widget-state or parameters as JSON.
+  string params_json = 2;
+  // The requesting principal.
+  string principal = 3;
+}
+message ViewResponse {
+  // For data views: updated spec_json. For web views: unused.
+  string spec_json = 1;
+  Payload data = 2;
+}
+
+message HealthRequest {
+  PluginIdentity plugin = 1;
+  google.protobuf.Timestamp since = 2;
+}
+message HealthResponse {
+  // "ok" | "degraded" | "unhealthy"
+  string status = 1;
+  string detail = 2;
+  // Capabilities currently registered (for drift detection).
+  repeated string active_tools = 3;
+  repeated string active_routes = 4;
+}
+
+// The single callback service every plugin implements.
+service PluginCallbacks {
+  rpc CallTool(ToolCallRequest) returns (ToolCallResponse);
+  rpc HandleRoute(RouteRequest) returns (RouteResponse);
+  rpc ScheduleTick(ScheduleTickRequest) returns (ScheduleTickResponse);
+  rpc OnEvent(EventDelivery) returns (EventAck);
+  rpc RenderView(ViewRequest) returns (ViewResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
