@@ -402,6 +402,26 @@ impl MemorySubstrate {
     /// Store an LLM-generated summary, replacing older messages with the kept subset.
     ///
     /// Used by the compactor to replace text-truncation compaction with an
+    /// Tag a session message (or `"__compacted__"` for the summary) with
+    /// taint labels — union-only (§14.9).
+    pub fn set_message_taint(
+        &self,
+        agent_id: AgentId,
+        message_key: &str,
+        labels: &[&str],
+    ) -> T3rnelResult<()> {
+        self.sessions
+            .set_message_taint(agent_id, message_key, labels)
+    }
+
+    /// message_key → taint labels for an agent's session messages.
+    pub fn message_taint_map(
+        &self,
+        agent_id: AgentId,
+    ) -> T3rnelResult<std::collections::BTreeMap<String, Vec<String>>> {
+        self.sessions.message_taint_map(agent_id)
+    }
+
     /// LLM-generated summary of older conversation history.
     pub fn store_llm_summary(
         &self,

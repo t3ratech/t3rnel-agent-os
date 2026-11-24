@@ -696,7 +696,10 @@ fn drain_agent_activity(home_dir: &Path) -> Option<String> {
         kept += 1;
     }
     if kept < lines.len() {
-        digest.insert_str(0, &format!("- … {} older rows omitted\n", lines.len() - kept));
+        digest.insert_str(
+            0,
+            &format!("- … {} older rows omitted\n", lines.len() - kept),
+        );
     }
     let _ = std::fs::write(activity_cursor_path(home_dir), end.to_string());
     Some(digest)
@@ -2988,14 +2991,8 @@ impl T3rnelKernel {
                 None => message,
             }
         } else {
-            self.report_agent_activity(
-                agent_id,
-                &agent_name,
-                "started",
-                &sender_label,
-                message,
-            )
-            .await;
+            self.report_agent_activity(agent_id, &agent_name, "started", &sender_label, message)
+                .await;
             message
         };
 
@@ -4862,7 +4859,7 @@ impl T3rnelKernel {
     /// Replaces the existing text-truncation compaction with an intelligent
     /// LLM-generated summary of older messages, keeping only recent messages.
     pub async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
-        use t3rnel_runtime::compactor::{compact_session, needs_compaction, CompactionConfig};
+        use t3rnel_runtime::compactor::{needs_compaction, CompactionConfig};
 
         let entry = self
             .registry
@@ -4894,9 +4891,21 @@ impl T3rnelKernel {
         let driver = self.resolve_driver(&entry.manifest)?;
         let model = entry.manifest.model.model.clone();
 
-        let result = compact_session(driver, &model, &session, &config)
-            .await
-            .map_err(|e| KernelError::T3rnel(T3rnelError::Internal(e)))?;
+        // §14.9: load per-message taint labels so the summary inherits the
+        // union of its sources' labels — never fewer.
+        let taint_map = self.memory.message_taint_map(agent_id).unwrap_or_default();
+        let result = t3rnel_runtime::compactor::compact_session_with_taint(
+            driver, &model, &session, &config, &taint_map,
+        )
+        .await
+        .map_err(|e| KernelError::T3rnel(T3rnelError::Internal(e)))?;
+        // Persist the union onto the compacted summary itself.
+        if !result.taint.is_empty() {
+            let labels: Vec<&str> = result.taint.iter().map(|s| s.as_str()).collect();
+            let _ = self
+                .memory
+                .set_message_taint(agent_id, "__compacted__", &labels);
+        }
 
         // Store the LLM summary in the canonical session
         self.memory
@@ -4991,9 +5000,10 @@ impl T3rnelKernel {
     ///
     /// See issue #890 — allows an orchestrator agent to wake other agents.
     pub fn activate_agent(&self, agent_id: AgentId) -> KernelResult<String> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
-            KernelError::T3rnel(T3rnelError::AgentNotFound(agent_id.to_string()))
-        })?;
+        let entry = self
+            .registry
+            .get(agent_id)
+            .ok_or_else(|| KernelError::T3rnel(T3rnelError::AgentNotFound(agent_id.to_string())))?;
 
         if entry.state == AgentState::Terminated {
             return Err(KernelError::T3rnel(T3rnelError::Internal(format!(
@@ -6651,8 +6661,7 @@ impl T3rnelKernel {
         // background loop's `active_runs` map already track for per-agent stops.
         // Keys are collected first — removing from a DashMap while iterating it
         // deadlocks.
-        let running_ids: Vec<AgentId> =
-            self.running_tasks.iter().map(|e| *e.key()).collect();
+        let running_ids: Vec<AgentId> = self.running_tasks.iter().map(|e| *e.key()).collect();
         for agent_id in running_ids {
             let _ = self.stop_agent_run(agent_id);
         }
@@ -8477,8 +8486,7 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
             | "cohere" | "xai" | "ollama" | "together" | "fireworks" | "perplexity"
             | "cerebras" | "sambanova" | "replicate" | "huggingface" | "ai21" | "codex"
             | "claude-code" | "copilot" | "github-copilot" | "qwen" | "zhipu" | "zai"
-            | "moonshot" | "openrouter" | "volcengine" | "doubao" | "dashscope"
-            | "jcode" => {
+            | "moonshot" | "openrouter" | "volcengine" | "doubao" | "dashscope" | "jcode" => {
                 return Some(prefix.to_string());
             }
             // "kimi" is a brand alias for moonshot
@@ -8602,11 +8610,7 @@ impl T3rnelKernel {
 
     /// Read a key from an agent's private unified-memory partition, falling
     /// back to the legacy flat store for values not yet imported.
-    pub fn agent_private_kv_get(
-        &self,
-        agent_id: AgentId,
-        key: &str,
-    ) -> Option<serde_json::Value> {
+    pub fn agent_private_kv_get(&self, agent_id: AgentId, key: &str) -> Option<serde_json::Value> {
         let (ctx, scope) = Self::private_memory_context(agent_id);
         self.memory
             .unified_command(&ctx, &scope, "kv_get", serde_json::json!({"key": key}))
@@ -10685,7 +10689,9 @@ mod tests {
         let first_instance_id = instance.instance_id;
 
         // Sanity: hand is Active and re-activation is rejected.
-        assert!(kernel.activate_hand("collector", HashMap::new(), None).is_err());
+        assert!(kernel
+            .activate_hand("collector", HashMap::new(), None)
+            .is_err());
 
         // Simulate what POST /api/agents/{id}/stop now does for a hand-owned
         // agent: look up the instance and deactivate the hand (which also
@@ -11062,11 +11068,8 @@ mod tests {
         let _ = kernel.send_message(worker, "implement the thing").await;
 
         // The orchestrator's own turn must not add rows about itself.
-        let _ = kernel
-            .send_message(_orchestrator, "what happened?")
-            .await;
-        let raw =
-            std::fs::read_to_string(home_dir.join("orchestrator-activity.jsonl")).unwrap();
+        let _ = kernel.send_message(_orchestrator, "what happened?").await;
+        let raw = std::fs::read_to_string(home_dir.join("orchestrator-activity.jsonl")).unwrap();
         let rows: Vec<serde_json::Value> = raw
             .lines()
             .filter_map(|l| serde_json::from_str(l).ok())

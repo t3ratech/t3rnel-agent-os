@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 15;
+const SCHEMA_VERSION: u32 = 17;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -82,6 +82,14 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 15 {
         crate::facade::migrate(conn)?;
+    }
+
+    if current_version < 16 {
+        migrate_v16(conn)?;
+    }
+
+    if current_version < 17 {
+        migrate_v17(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -506,6 +514,46 @@ fn migrate_v14(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description)
          VALUES (14, datetime('now'), 'Add team_id to kv_store for team-scoped memory')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 16: permanent taint labels on memories (05-security §14.9/§14.10).
+/// `taint` is a JSON array of data-class labels; consolidation and
+/// summarisation must union — never drop — these labels.
+fn migrate_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "memories", "taint") {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN taint TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description)
+         VALUES (16, datetime('now'), 'Add taint labels column to memories')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 17: per-message and compacted-summary taint labels
+/// (05-security §14.9/§14.10). Labels are JSON arrays of data-class strings;
+/// they union through compaction and can never be dropped by summarisation.
+fn migrate_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS session_message_taint (
+            agent_id TEXT NOT NULL,
+            message_key TEXT NOT NULL,
+            taint TEXT NOT NULL DEFAULT '[]',
+            PRIMARY KEY (agent_id, message_key)
+        );
+        ",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description)
+         VALUES (17, datetime('now'), 'Add session_message_taint for compaction-proof taint labels')",
         [],
     )?;
     Ok(())

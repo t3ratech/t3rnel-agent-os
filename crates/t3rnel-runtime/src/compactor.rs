@@ -77,6 +77,10 @@ pub struct CompactionResult {
     pub chunks_used: u32,
     /// Whether fallback was used (LLM unavailable).
     pub used_fallback: bool,
+    /// Union of taint labels from the compacted messages (§14.9): the
+    /// summary inherits every label of its sources — labels can never be
+    /// dropped by summarisation.
+    pub taint: Vec<String>,
 }
 
 /// Check whether a session needs compaction (message-count trigger).
@@ -700,6 +704,7 @@ pub async fn compact_session(
             compacted_count: 0,
             chunks_used: 0,
             used_fallback: false,
+            taint: Vec::new(),
         });
     }
 
@@ -735,6 +740,7 @@ pub async fn compact_session(
                 compacted_count,
                 chunks_used: 1,
                 used_fallback: false,
+                taint: Vec::new(),
             });
         }
         Err(e) => {
@@ -762,6 +768,7 @@ pub async fn compact_session(
                 compacted_count,
                 chunks_used: num_chunks.max(1),
                 used_fallback: false,
+                taint: Vec::new(),
             });
         }
         Err(e) => {
@@ -788,7 +795,47 @@ pub async fn compact_session(
         compacted_count,
         chunks_used: 0,
         used_fallback: true,
+        taint: Vec::new(),
     })
+}
+
+/// Union of taint labels for a set of messages, given the agent's
+/// message_key → labels map. `"__compacted__"` is NOT included — it belongs
+/// to the summary, not its sources.
+pub fn union_message_taint(
+    messages: &[Message],
+    taint_map: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for m in messages {
+        if let Some(labels) = taint_map.get(&m.msg_id) {
+            for l in labels {
+                set.insert(l.clone());
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Compaction with taint propagation (§14.9): identical to
+/// [`compact_session`] but the result's `taint` field is the UNION of every
+/// compacted message's labels. The caller persists the union onto the
+/// summary (e.g. `SessionStore::set_message_taint`, key `"__compacted__"`).
+pub async fn compact_session_with_taint(
+    driver: Arc<dyn LlmDriver>,
+    model: &str,
+    session: &Session,
+    config: &CompactionConfig,
+    taint_map: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<CompactionResult, String> {
+    let mut result = compact_session(driver, model, session, config).await?;
+    if result.compacted_count > 0 {
+        let msg_count = session.messages.len();
+        let raw_split = msg_count.saturating_sub(config.keep_recent);
+        let split_at = adjust_split_for_tool_pairs(&session.messages, raw_split);
+        result.taint = union_message_taint(&session.messages[..split_at], taint_map);
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1246,6 +1293,7 @@ mod tests {
             compacted_count: 10,
             chunks_used: 3,
             used_fallback: false,
+            taint: Vec::new(),
         };
         assert_eq!(result.chunks_used, 3);
         assert!(!result.used_fallback);
@@ -1256,6 +1304,7 @@ mod tests {
             compacted_count: 5,
             chunks_used: 0,
             used_fallback: true,
+            taint: Vec::new(),
         };
         assert_eq!(fallback_result.chunks_used, 0);
         assert!(fallback_result.used_fallback);
