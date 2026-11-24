@@ -114,9 +114,10 @@ impl JcodeDriver {
             .stderr(std::process::Stdio::null())
             .output()
             .ok()?;
-        output.status.success().then(|| {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        })
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     /// Flatten the request into a single prompt for `jcode run <message>`.
@@ -205,10 +206,7 @@ impl LlmDriver for JcodeDriver {
         let model_flag = Self::model_flag(&request.model);
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
-        cmd.arg("run")
-            .arg("-p")
-            .arg(&self.provider)
-            .arg("--json");
+        cmd.arg("run").arg("-p").arg(&self.provider).arg("--json");
         if let Some(ref model) = model_flag {
             cmd.arg("-m").arg(model);
         }
@@ -286,12 +284,18 @@ impl LlmDriver for JcodeDriver {
         if !status.success() {
             let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
             let stdout_str = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
-            let detail = if !stderr.is_empty() { &stderr } else { &stdout_str };
+            let detail = if !stderr.is_empty() {
+                &stderr
+            } else {
+                &stdout_str
+            };
             let code = status.code().unwrap_or(1);
             warn!(exit_code = code, model = %pid_label, stderr = %detail, "JCode CLI exited with error");
             let message = if detail.contains("auth") || detail.contains("login") {
-                format!("JCode is not authenticated for {}. Run: jcode login {}\nDetail: {detail}",
-                        self.provider, self.provider)
+                format!(
+                    "JCode is not authenticated for {}. Run: jcode login {}\nDetail: {detail}",
+                    self.provider, self.provider
+                )
             } else {
                 format!("JCode CLI exited with code {code}: {detail}")
             };
@@ -358,11 +362,7 @@ impl LlmDriver for JcodeDriver {
         let response = self.complete(request).await?;
         for block in &response.content {
             if let ContentBlock::Text { text, .. } = block {
-                let _ = tx
-                    .send(StreamEvent::TextDelta {
-                        text: text.clone(),
-                    })
-                    .await;
+                let _ = tx.send(StreamEvent::TextDelta { text: text.clone() }).await;
             }
         }
         Ok(response)

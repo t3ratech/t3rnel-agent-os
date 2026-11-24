@@ -26,10 +26,7 @@ const CLOUDFLARE_IMAGE_MODELS: &[(&str, bool)] = &[
 /// Gemini image-generation models on the AI Studio free tier, best first.
 /// These are the "flash image" models returned under `categories.image_generation`
 /// in `config/category-templates.toml`; both accept `responseModalities=["IMAGE"]`.
-const GEMINI_IMAGE_MODELS: &[&str] = &[
-    "gemini-3.1-flash-image",
-    "gemini-2.5-flash-image",
-];
+const GEMINI_IMAGE_MODELS: &[&str] = &["gemini-3.1-flash-image", "gemini-2.5-flash-image"];
 
 /// Hugging Face Inference Providers, best first. The deprecated
 /// `hf-inference` provider path is gone — each provider now serves an
@@ -322,7 +319,12 @@ async fn generate_image_huggingface(request: &ImageGenRequest) -> Result<ImageGe
                 continue;
             }
 
-            info!(provider = "huggingface", hf_provider = provider, model, "Generated image");
+            info!(
+                provider = "huggingface",
+                hf_provider = provider,
+                model,
+                "Generated image"
+            );
             return Ok(ImageGenResult {
                 images: vec![GeneratedImage {
                     data_base64: b64.to_string(),

@@ -2200,16 +2200,34 @@ mod tests {
 
     #[test]
     fn test_manifest_reasoning_effort_is_sent_as_is_for_any_model() {
-        assert_eq!(request_reasoning_effort(&effort_request("gpt-6-luna", Some("high"))).as_deref(), Some("high"));
-        assert_eq!(request_reasoning_effort(&effort_request("gpt-6-luna", Some("max"))).as_deref(), Some("max"));
-        assert_eq!(request_reasoning_effort(&effort_request("gpt-5.5", Some("low"))).as_deref(), Some("low"));
+        assert_eq!(
+            request_reasoning_effort(&effort_request("gpt-6-luna", Some("high"))).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            request_reasoning_effort(&effort_request("gpt-6-luna", Some("max"))).as_deref(),
+            Some("max")
+        );
+        assert_eq!(
+            request_reasoning_effort(&effort_request("gpt-5.5", Some("low"))).as_deref(),
+            Some("low")
+        );
     }
 
     #[test]
     fn test_without_a_manifest_effort_the_model_family_decides() {
-        assert_eq!(request_reasoning_effort(&effort_request("gpt-6-luna", None)), None);
-        assert_eq!(request_reasoning_effort(&effort_request("gpt-6-luna", Some("  "))), None);
-        assert_eq!(request_reasoning_effort(&effort_request("gpt-5.5", None)).as_deref(), Some("high"));
+        assert_eq!(
+            request_reasoning_effort(&effort_request("gpt-6-luna", None)),
+            None
+        );
+        assert_eq!(
+            request_reasoning_effort(&effort_request("gpt-6-luna", Some("  "))),
+            None
+        );
+        assert_eq!(
+            request_reasoning_effort(&effort_request("gpt-5.5", None)).as_deref(),
+            Some("high")
+        );
     }
 
     #[test]

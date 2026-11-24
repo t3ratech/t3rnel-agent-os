@@ -423,7 +423,11 @@ pub async fn build_router(
             axum::routing::get(routes::get_template),
         )
         // Memory endpoints
-        .route("/api/memory/command", axum::routing::post(crate::memory_routes::command).layer(axum::extract::DefaultBodyLimit::max(65_536)))
+        .route(
+            "/api/memory/command",
+            axum::routing::post(crate::memory_routes::command)
+                .layer(axum::extract::DefaultBodyLimit::max(65_536)),
+        )
         .route(
             "/api/memory/records",
             axum::routing::get(crate::memory_routes::search)

@@ -636,7 +636,10 @@ impl BrowserSession {
                 direction,
                 amount,
                 selector,
-            } => self.cmd_scroll(&direction, amount, selector.as_deref()).await,
+            } => {
+                self.cmd_scroll(&direction, amount, selector.as_deref())
+                    .await
+            }
             BrowserCommand::Wait {
                 condition,
                 target,
@@ -654,10 +657,7 @@ impl BrowserSession {
                 selector,
                 value,
                 index,
-            } => {
-                self.cmd_select(&selector, value.as_deref(), index)
-                    .await
-            }
+            } => self.cmd_select(&selector, value.as_deref(), index).await,
             BrowserCommand::ListTabs => self.cmd_list_tabs().await,
             BrowserCommand::SwitchTab { index } => {
                 self.cmd_switch_tab_impl(Some(index), None).await
@@ -687,7 +687,10 @@ impl BrowserSession {
         if new_tab {
             match self
                 .cdp
-                .send("Target.createTarget", serde_json::json!({"url": "about:blank"}))
+                .send(
+                    "Target.createTarget",
+                    serde_json::json!({"url": "about:blank"}),
+                )
                 .await
             {
                 Ok(v) => {
@@ -1398,7 +1401,10 @@ impl BrowserSession {
 
         match self
             .cdp
-            .send("Target.closeTarget", serde_json::json!({"targetId": target_id}))
+            .send(
+                "Target.closeTarget",
+                serde_json::json!({"targetId": target_id}),
+            )
             .await
         {
             Ok(v) if v["success"].as_bool() == Some(true) => {}
@@ -2608,8 +2614,7 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"action\":\"Screenshot\""));
         // Old serialized form `{"action":"Screenshot"}` still decodes.
-        let parsed: BrowserCommand =
-            serde_json::from_str(r#"{"action":"Screenshot"}"#).unwrap();
+        let parsed: BrowserCommand = serde_json::from_str(r#"{"action":"Screenshot"}"#).unwrap();
         assert!(matches!(
             parsed,
             BrowserCommand::Screenshot {
@@ -2738,7 +2743,10 @@ mod tests {
     #[test]
     fn test_arg_str_accepts_extension_and_daemon_names() {
         let input = serde_json::json!({"code": "document.title"});
-        assert_eq!(arg_str(&input, &["expression", "code"]), Some("document.title"));
+        assert_eq!(
+            arg_str(&input, &["expression", "code"]),
+            Some("document.title")
+        );
         let input = serde_json::json!({"expression": "1+1"});
         assert_eq!(arg_str(&input, &["expression", "code"]), Some("1+1"));
         // Empty strings do not satisfy the requirement.
@@ -2760,10 +2768,7 @@ mod tests {
         );
         // Explicit index wins over tabId when both arrive.
         assert_eq!(
-            arg_u64(
-                &serde_json::json!({"index": 0, "tabId": 9}),
-                TAB_INDEX_KEYS
-            ),
+            arg_u64(&serde_json::json!({"index": 0, "tabId": 9}), TAB_INDEX_KEYS),
             Some(0)
         );
         assert_eq!(arg_u64(&serde_json::json!({}), TAB_INDEX_KEYS), None);
@@ -2771,9 +2776,18 @@ mod tests {
 
     #[test]
     fn test_arg_bool_accepts_new_tab_aliases() {
-        assert!(arg_bool(&serde_json::json!({"newTab": true}), &["new_tab", "newTab"]));
-        assert!(arg_bool(&serde_json::json!({"new_tab": true}), &["new_tab", "newTab"]));
-        assert!(!arg_bool(&serde_json::json!({"newTab": false}), &["new_tab", "newTab"]));
+        assert!(arg_bool(
+            &serde_json::json!({"newTab": true}),
+            &["new_tab", "newTab"]
+        ));
+        assert!(arg_bool(
+            &serde_json::json!({"new_tab": true}),
+            &["new_tab", "newTab"]
+        ));
+        assert!(!arg_bool(
+            &serde_json::json!({"newTab": false}),
+            &["new_tab", "newTab"]
+        ));
         assert!(!arg_bool(&serde_json::json!({}), &["new_tab", "newTab"]));
     }
 
@@ -2795,10 +2809,8 @@ mod tests {
         assert!(json.contains("\"index\":2"));
         // Old serialized form `{"action":"Select","selector":"s","value":"v"}`
         // still decodes with index absent.
-        let parsed: BrowserCommand = serde_json::from_str(
-            r#"{"action":"Select","selector":"s","value":"v"}"#,
-        )
-        .unwrap();
+        let parsed: BrowserCommand =
+            serde_json::from_str(r#"{"action":"Select","selector":"s","value":"v"}"#).unwrap();
         assert!(matches!(
             parsed,
             BrowserCommand::Select {
@@ -2822,7 +2834,10 @@ mod tests {
                 serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
             assert!(matches!(
                 parsed,
-                BrowserCommand::Wait { timeout_ms: 1000, .. }
+                BrowserCommand::Wait {
+                    timeout_ms: 1000,
+                    ..
+                }
             ));
         }
     }

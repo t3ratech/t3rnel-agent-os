@@ -81,7 +81,10 @@ fn store_path() -> PathBuf {
 }
 
 static STORE: LazyLock<Mutex<PendingStore>> = LazyLock::new(|| {
-    let mut store = PendingStore { path: Some(store_path()), ..Default::default() };
+    let mut store = PendingStore {
+        path: Some(store_path()),
+        ..Default::default()
+    };
     store.load();
     Mutex::new(store)
 });
@@ -114,8 +117,7 @@ impl PendingStore {
 
     /// Live = pending and not past expiry.
     fn is_live(item: &PendingAction, now: DateTime<Utc>) -> bool {
-        item.state == PendingState::Pending
-            && item.expires_at.map(|e| e > now).unwrap_or(true)
+        item.state == PendingState::Pending && item.expires_at.map(|e| e > now).unwrap_or(true)
     }
 
     pub fn list(&self) -> Vec<PendingAction> {
@@ -128,7 +130,10 @@ impl PendingStore {
     }
 
     pub fn get(&self, id: &str) -> Option<PendingAction> {
-        self.items.iter().find(|i| i.id.eq_ignore_ascii_case(id)).cloned()
+        self.items
+            .iter()
+            .find(|i| i.id.eq_ignore_ascii_case(id))
+            .cloned()
     }
 
     pub fn create(&mut self, mut item: PendingAction) -> PendingAction {
@@ -152,7 +157,10 @@ impl PendingStore {
         note: Option<String>,
         decided_by: &str,
     ) -> Result<PendingAction, String> {
-        if !matches!(decision, PendingState::Approved | PendingState::Rejected | PendingState::Cancelled) {
+        if !matches!(
+            decision,
+            PendingState::Approved | PendingState::Rejected | PendingState::Cancelled
+        ) {
             return Err("decision must be approved, rejected or cancelled".into());
         }
         let now = Utc::now();
@@ -163,7 +171,11 @@ impl PendingStore {
                 .find(|i| i.id.eq_ignore_ascii_case(id))
                 .ok_or_else(|| format!("no pending item {id}"))?;
             if item.state != PendingState::Pending {
-                return Err(format!("{} is already {}", item.id, state_name(&item.state)));
+                return Err(format!(
+                    "{} is already {}",
+                    item.id,
+                    state_name(&item.state)
+                ));
             }
             if item.expires_at.map(|e| e <= now).unwrap_or(false) {
                 item.state = PendingState::Expired;
@@ -180,7 +192,12 @@ impl PendingStore {
         if expired {
             return Err(format!("{id} has expired"));
         }
-        Ok(self.items.iter().find(|i| i.id.eq_ignore_ascii_case(id)).unwrap().clone())
+        Ok(self
+            .items
+            .iter()
+            .find(|i| i.id.eq_ignore_ascii_case(id))
+            .unwrap()
+            .clone())
     }
 
     pub fn snooze(&mut self, id: &str, secs: i64) -> Result<PendingAction, String> {
@@ -190,7 +207,11 @@ impl PendingStore {
             .find(|i| i.id.eq_ignore_ascii_case(id))
             .ok_or_else(|| format!("no pending item {id}"))?;
         if item.state != PendingState::Pending {
-            return Err(format!("{} is already {}", item.id, state_name(&item.state)));
+            return Err(format!(
+                "{} is already {}",
+                item.id,
+                state_name(&item.state)
+            ));
         }
         let base = item.expires_at.unwrap_or_else(Utc::now);
         item.expires_at = Some(base + chrono::Duration::seconds(secs.max(60)));
@@ -232,7 +253,9 @@ pub fn create_pending(req: CreatePendingRequest) -> PendingAction {
         callback: req.callback,
         risk: req.risk,
         created_at: Utc::now(),
-        expires_at: req.ttl_secs.map(|s| Utc::now() + chrono::Duration::seconds(s)),
+        expires_at: req
+            .ttl_secs
+            .map(|s| Utc::now() + chrono::Duration::seconds(s)),
         state: PendingState::Pending,
         decision_note: None,
         decided_by: None,
@@ -241,12 +264,21 @@ pub fn create_pending(req: CreatePendingRequest) -> PendingAction {
     })
 }
 
-pub fn resolve_pending(id: &str, decision: &str, note: Option<String>, via: &str) -> Result<PendingAction, String> {
+pub fn resolve_pending(
+    id: &str,
+    decision: &str,
+    note: Option<String>,
+    via: &str,
+) -> Result<PendingAction, String> {
     let state = match decision {
         "approve" | "approved" | "yes" => PendingState::Approved,
         "reject" | "rejected" | "no" => PendingState::Rejected,
         "cancel" | "cancelled" => PendingState::Cancelled,
-        other => return Err(format!("unknown decision {other:?}; use approve|reject|cancel")),
+        other => {
+            return Err(format!(
+                "unknown decision {other:?}; use approve|reject|cancel"
+            ))
+        }
     };
     STORE.lock().unwrap().resolve(id, state, note, via)
 }

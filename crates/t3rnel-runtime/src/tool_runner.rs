@@ -418,14 +418,12 @@ pub async fn execute_tool(
         "memory_recall" => tool_memory_recall(input, kernel, caller_agent_id),
         "memory_search" | "memory_remember" | "memory_get" | "memory_ls" | "memory_handover"
         | "memory_brief" | "memory_supersede" | "memory_expire" | "memory_restore"
-        | "memory_events" | "memory_conflicts" | "memory_history" => {
-            tool_memory_command(
-                tool_name.trim_start_matches("memory_"),
-                input,
-                kernel,
-                caller_agent_id,
-            )
-        }
+        | "memory_events" | "memory_conflicts" | "memory_history" => tool_memory_command(
+            tool_name.trim_start_matches("memory_"),
+            input,
+            kernel,
+            caller_agent_id,
+        ),
 
         // Collaboration tools
         "agent_find" => tool_agent_find(input, kernel),
@@ -820,10 +818,8 @@ pub async fn execute_tool(
             // instructions" or a request to exfiltrate what this session holds.
             // Blocked content never reaches the model; the agent gets a refusal
             // that names the finding kinds instead.
-            let report = t3rnel_types::sentinel::scan(
-                &content,
-                t3rnel_types::sentinel::Direction::Ingress,
-            );
+            let report =
+                t3rnel_types::sentinel::scan(&content, t3rnel_types::sentinel::Direction::Ingress);
             if report.blocked {
                 let kinds: Vec<String> = {
                     let mut k: Vec<String> = report
@@ -2709,10 +2705,8 @@ async fn tool_agent_spawn(
         .ok_or("Missing 'manifest_toml' parameter")?;
     // Ingress scan: a manifest becomes the spawned agent's standing
     // instructions — a compromised parent could otherwise mint a puppet.
-    let report = t3rnel_types::sentinel::scan(
-        manifest_toml,
-        t3rnel_types::sentinel::Direction::Ingress,
-    );
+    let report =
+        t3rnel_types::sentinel::scan(manifest_toml, t3rnel_types::sentinel::Direction::Ingress);
     if report.blocked {
         return Err(format!(
             "agent_spawn refused by ingress sentinel ({}). The agent was not created.",

@@ -442,9 +442,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             .or(config.subprocess_timeout_secs);
         let jcode_provider = std::env::var("T3RNEL_JCODE_PROVIDER").ok();
         return Ok(Arc::new(match timeout {
-            Some(secs) => {
-                jcode::JcodeDriver::with_timeout(cli_path, jcode_provider, secs)
-            }
+            Some(secs) => jcode::JcodeDriver::with_timeout(cli_path, jcode_provider, secs),
             None => jcode::JcodeDriver::new(cli_path, jcode_provider),
         }));
     }

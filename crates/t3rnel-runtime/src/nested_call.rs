@@ -96,7 +96,9 @@ mod tests {
 
     /// An agent that, like orchestrator <-> project-manager, answers by calling
     /// another agent, which does the same, forever.
-    fn ping_pong(hops: Arc<AtomicU32>) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+    fn ping_pong(
+        hops: Arc<AtomicU32>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
         Box::pin(async move {
             hops.fetch_add(1, Ordering::SeqCst);
             run_nested_agent_call("peer", LONG, ping_pong(hops)).await
@@ -148,7 +150,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(inside, (before + 1).to_string());
-        assert_eq!(current_agent_depth(), before, "the caller's depth is untouched");
+        assert_eq!(
+            current_agent_depth(),
+            before,
+            "the caller's depth is untouched"
+        );
     }
 
     /// The overflow came from the callee being polled on top of the caller's stack.
@@ -158,11 +164,10 @@ mod tests {
         // The caller is itself a task, as an agent loop is in the daemon.
         let (caller, callee) = tokio::spawn(async {
             let caller = tokio::task::id().to_string();
-            let callee = run_nested_agent_call("peer", LONG, async {
-                Ok(tokio::task::id().to_string())
-            })
-            .await
-            .unwrap();
+            let callee =
+                run_nested_agent_call("peer", LONG, async { Ok(tokio::task::id().to_string()) })
+                    .await
+                    .unwrap();
             (caller, callee)
         })
         .await
@@ -202,7 +207,10 @@ mod tests {
 
         let error = result.expect_err("must time out");
         assert!(error.contains("timed out"), "unexpected error: {error}");
-        assert!(wait_until_set(&dropped).await, "callee kept running after the timeout");
+        assert!(
+            wait_until_set(&dropped).await,
+            "callee kept running after the timeout"
+        );
     }
 
     #[tokio::test]
@@ -220,7 +228,10 @@ mod tests {
         .await;
 
         assert!(outer.is_err(), "outer timeout should have fired");
-        assert!(wait_until_set(&dropped).await, "callee outlived its cancelled caller");
+        assert!(
+            wait_until_set(&dropped).await,
+            "callee outlived its cancelled caller"
+        );
     }
 
     #[tokio::test]
@@ -241,7 +252,8 @@ mod tests {
         let ok = run_nested_agent_call("peer", LONG, async { Ok("hello".to_string()) }).await;
         assert_eq!(ok.unwrap(), "hello");
 
-        let err = run_nested_agent_call("peer", LONG, async { Err("no such agent".to_string()) }).await;
+        let err =
+            run_nested_agent_call("peer", LONG, async { Err("no such agent".to_string()) }).await;
         assert_eq!(err.unwrap_err(), "no such agent");
     }
 }

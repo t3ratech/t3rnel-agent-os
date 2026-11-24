@@ -1731,7 +1731,11 @@ async fn call_with_retry(
                     );
                     // Only a billing failure is account-wide, so only then are the same provider's other models pointless to try. A rate
                     // limit, an overload or a retired model is that model's problem: its siblings behind the same gateway are fine.
-                    let skip_provider = if classified.is_billing { driver_provider } else { None };
+                    let skip_provider = if classified.is_billing {
+                        driver_provider
+                    } else {
+                        None
+                    };
                     if let Ok(response) =
                         try_fallback_models(&request, fallback_models, skip_provider, cooldown)
                             .await

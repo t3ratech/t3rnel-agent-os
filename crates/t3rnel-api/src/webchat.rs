@@ -587,8 +587,7 @@ mod tests {
             "agent-card.json", // only legal under /.well-known/
             "evil.sh",
         ] {
-            let response =
-                react_agent_surface(axum::extract::Path(file.to_string())).await;
+            let response = react_agent_surface(axum::extract::Path(file.to_string())).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{file}");
         }
     }
@@ -604,16 +603,21 @@ mod tests {
 
         let md = react_agent_surface(axum::extract::Path("AGENTS.md".to_string())).await;
         assert_eq!(md.status(), StatusCode::OK);
-        assert_eq!(md.headers()[header::CONTENT_TYPE], "text/markdown; charset=utf-8");
+        assert_eq!(
+            md.headers()[header::CONTENT_TYPE],
+            "text/markdown; charset=utf-8"
+        );
         assert!(body_text(md).await.contains("test contract"));
 
         let card = react_well_known(axum::extract::Path("agent-card.json".to_string())).await;
         assert_eq!(card.status(), StatusCode::OK);
-        assert_eq!(card.headers()[header::CONTENT_TYPE], "application/json; charset=utf-8");
+        assert_eq!(
+            card.headers()[header::CONTENT_TYPE],
+            "application/json; charset=utf-8"
+        );
 
         // Traversal into .well-known stays refused.
-        let traversal =
-            react_well_known(axum::extract::Path("../AGENTS.md".to_string())).await;
+        let traversal = react_well_known(axum::extract::Path("../AGENTS.md".to_string())).await;
         assert_eq!(traversal.status(), StatusCode::NOT_FOUND);
 
         std::env::remove_var("T3RNEL_WEB_DIST");

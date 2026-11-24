@@ -8,14 +8,14 @@ use t3rnel_types::model_catalog::{
     cloudflare_base_url_from_env, AuthStatus, ModelCatalogEntry, ModelTier, ProviderInfo,
     AI21_BASE_URL, ANTHROPIC_BASE_URL, AZURE_OPENAI_BASE_URL, BEDROCK_BASE_URL, CEREBRAS_BASE_URL,
     CHUTES_BASE_URL, CLOUDFLARE_BASE_URL_TEMPLATE, COHERE_BASE_URL, DEEPSEEK_BASE_URL,
-    EXPERIENTIAL_LABS_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL,
-    HUGGINGFACE_BASE_URL, INFERENCE_DOT_NET_BASE_URL, KIMI_CODING_BASE_URL, LEMONADE_BASE_URL, LMSTUDIO_BASE_URL,
-    MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, MORPHLLM_BASE_URL, NVIDIA_NIM_BASE_URL,
-    OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL,
-    QWEN_BASE_URL, REPLICATE_BASE_URL, REQUESTY_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL,
-    VENICE_BASE_URL,
-    VLLM_BASE_URL, VOLCENGINE_BASE_URL, VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL,
-    ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
+    EXPERIENTIAL_LABS_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL,
+    GROQ_BASE_URL, HUGGINGFACE_BASE_URL, INFERENCE_DOT_NET_BASE_URL, KIMI_CODING_BASE_URL,
+    LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL,
+    MORPHLLM_BASE_URL, NVIDIA_NIM_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
+    PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL, REQUESTY_BASE_URL,
+    SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VENICE_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
+    VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
+    ZHIPU_CODING_BASE_URL,
 };
 
 /// The model catalog — registry of all known models and providers.
@@ -2876,7 +2876,11 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
-            aliases: vec!["llama-3.1-8b-nvidia".into(), "llama-3.1-8b".into(), "llama-3.3-8b".into()],
+            aliases: vec![
+                "llama-3.1-8b-nvidia".into(),
+                "llama-3.1-8b".into(),
+                "llama-3.3-8b".into(),
+            ],
             tpm_limit: None,
             tpd_limit: None,
         },
@@ -4109,7 +4113,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_vision: false,
             supports_streaming: true,
             aliases: vec!["llama-3.1-8b".into()],
-            tpm_limit: Some(7_500),  // 实测: 8000 TPM limit, set to 7500 to leave room for input tokens
+            tpm_limit: Some(7_500), // 实测: 8000 TPM limit, set to 7500 to leave room for input tokens
             tpd_limit: Some(100_000),
         },
         ModelCatalogEntry {
@@ -4125,7 +4129,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_vision: false,
             supports_streaming: true,
             aliases: vec!["llama-3.3-70b".into()],
-            tpm_limit: Some(7_500),  // 实测: 8000 TPM limit, set to 7500 to leave room for input tokens
+            tpm_limit: Some(7_500), // 实测: 8000 TPM limit, set to 7500 to leave room for input tokens
             tpd_limit: Some(100_000),
         },
         ModelCatalogEntry {
@@ -4141,7 +4145,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_vision: false,
             supports_streaming: true,
             aliases: vec!["gpt-oss-120b".into()],
-            tpm_limit: Some(7_500),  // 实测: 8000 TPM limit, set to 7500 to leave room for input tokens
+            tpm_limit: Some(7_500), // 实测: 8000 TPM limit, set to 7500 to leave room for input tokens
             tpd_limit: Some(100_000),
         },
         ModelCatalogEntry {

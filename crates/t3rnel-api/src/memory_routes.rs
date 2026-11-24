@@ -106,14 +106,33 @@ pub struct Command {
 
 pub async fn command(State(state): State<Arc<AppState>>, Json(request): Json<Command>) -> Response {
     let operation = match request.operation.as_str() {
-        "remember" => "remember", "search" => "search", "ls" => "ls", "facts" => "facts",
-        "handover" => "handover", "get" => "get", "kv_get" => "kv_get", "kv_set" => "kv_set",
-        "supersede" => "supersede", "expire" => "expire", "restore" => "restore",
-        "expire_sweep" => "expire_sweep", "purge_expired" => "purge_expired",
-        "policy_set" => "policy_set", "policy_get" => "policy_get",
-        "brief" => "brief", "conflicts" => "conflicts", "history" => "history",
-        "events" => "events", "export" => "export",
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Unknown memory operation"}))).into_response(),
+        "remember" => "remember",
+        "search" => "search",
+        "ls" => "ls",
+        "facts" => "facts",
+        "handover" => "handover",
+        "get" => "get",
+        "kv_get" => "kv_get",
+        "kv_set" => "kv_set",
+        "supersede" => "supersede",
+        "expire" => "expire",
+        "restore" => "restore",
+        "expire_sweep" => "expire_sweep",
+        "purge_expired" => "purge_expired",
+        "policy_set" => "policy_set",
+        "policy_get" => "policy_get",
+        "brief" => "brief",
+        "conflicts" => "conflicts",
+        "history" => "history",
+        "events" => "events",
+        "export" => "export",
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Unknown memory operation"})),
+            )
+                .into_response()
+        }
     };
     run(state, operation, request.args).await
 }

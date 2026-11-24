@@ -1124,12 +1124,8 @@ async fn browser_tool_via_cdp(
             .or(index_arg)
             .or_else(|| args["tab_index"].as_u64());
         if let Some(index) = tab {
-            let switched = b::tool_browser_switch_tab(
-                &serde_json::json!({"index": index}),
-                mgr,
-                &aid,
-            )
-            .await;
+            let switched =
+                b::tool_browser_switch_tab(&serde_json::json!({"index": index}), mgr, &aid).await;
             if let Err(e) = switched {
                 return Some(Err(format!("tabId {index}: {e}")));
             }
@@ -1167,7 +1163,11 @@ async fn browser_tool_via_cdp(
             mgr.has_session(&aid),
             // A hardcoded "absent" here once claimed the extension was gone
             // while it was really connected — probe the bridge, don't guess.
-            if state.kernel.browser_extension_bridge.connected(agent_id) { "connected" } else { "absent" }
+            if state.kernel.browser_extension_bridge.connected(agent_id) {
+                "connected"
+            } else {
+                "absent"
+            }
         )),
         _ => return None,
     };
@@ -4304,7 +4304,6 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // WhatsApp QR login flow (OpenClaw-style)
 // ---------------------------------------------------------------------------
@@ -4743,7 +4742,13 @@ pub async fn set_agent_kv_key(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let value = body.get("value").cloned().unwrap_or(body);
-    crate::memory_routes::run_for(state, Some(&id), "kv_set", serde_json::json!({"key":key,"value":value})).await
+    crate::memory_routes::run_for(
+        state,
+        Some(&id),
+        "kv_set",
+        serde_json::json!({"key":key,"value":value}),
+    )
+    .await
 }
 
 /// DELETE /api/memory/agents/:id/kv/:key — Delete a KV value.
@@ -4751,7 +4756,13 @@ pub async fn delete_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    crate::memory_routes::run_for(state, Some(&id), "kv_delete", serde_json::json!({"key":key})).await
+    crate::memory_routes::run_for(
+        state,
+        Some(&id),
+        "kv_delete",
+        serde_json::json!({"key":key}),
+    )
+    .await
 }
 
 /// GET /api/health — Minimal liveness probe (public, no auth required).
@@ -11510,9 +11521,7 @@ pub async fn telegram_webhook(
     ) {
         Ok(message) => {
             let ack = format!("Telegram command received: {text}");
-            if let Err(e) =
-                append_text_to_agent_session(&state, "t3rnel", text, Some(&ack)).await
-            {
+            if let Err(e) = append_text_to_agent_session(&state, "t3rnel", text, Some(&ack)).await {
                 tracing::warn!("failed to append telegram command to orchestrator session: {e}");
             }
             Json(serde_json::json!({
@@ -16554,7 +16563,9 @@ pub async fn resolve_pending_action(
     if via == "agent" || via == "orchestrator" || via == "t3rnel" {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "agents cannot resolve pending items; the operator must decide"})),
+            Json(
+                serde_json::json!({"error": "agents cannot resolve pending items; the operator must decide"}),
+            ),
         );
     }
     match crate::pending_actions::resolve_pending(&id, &req.decision, req.note.clone(), &via) {
@@ -16563,18 +16574,32 @@ pub async fn resolve_pending_action(
             // (callback="approval", detail_ref=approval uuid) resolves the
             // underlying approval too, so both surfaces agree.
             if item.callback.as_deref() == Some("approval") {
-                if let Some(r) = item.detail_ref.as_deref().and_then(|r| uuid::Uuid::parse_str(r).ok()) {
+                if let Some(r) = item
+                    .detail_ref
+                    .as_deref()
+                    .and_then(|r| uuid::Uuid::parse_str(r).ok())
+                {
                     let decision = match item.state {
-                        crate::pending_actions::PendingState::Approved => t3rnel_types::approval::ApprovalDecision::Approved,
+                        crate::pending_actions::PendingState::Approved => {
+                            t3rnel_types::approval::ApprovalDecision::Approved
+                        }
                         _ => t3rnel_types::approval::ApprovalDecision::Denied,
                     };
-                    let _ = state.kernel.approval_manager.resolve(r, decision, Some(format!("pending-actions:{via}")));
+                    let _ = state.kernel.approval_manager.resolve(
+                        r,
+                        decision,
+                        Some(format!("pending-actions:{via}")),
+                    );
                 }
             }
             (StatusCode::OK, Json(serde_json::json!(item)))
         }
         Err(e) => {
-            let status = if e.contains("already") { StatusCode::CONFLICT } else { StatusCode::NOT_FOUND };
+            let status = if e.contains("already") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::NOT_FOUND
+            };
             (status, Json(serde_json::json!({"error": e})))
         }
     }
@@ -16588,7 +16613,11 @@ pub async fn snooze_pending_action(
     match crate::pending_actions::snooze_pending(&id, req.secs) {
         Ok(item) => (StatusCode::OK, Json(serde_json::json!(item))),
         Err(e) => {
-            let status = if e.contains("already") { StatusCode::CONFLICT } else { StatusCode::NOT_FOUND };
+            let status = if e.contains("already") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::NOT_FOUND
+            };
             (status, Json(serde_json::json!({"error": e})))
         }
     }

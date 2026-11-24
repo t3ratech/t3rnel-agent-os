@@ -511,7 +511,10 @@ pub fn global_provider_cooldown() -> &'static ProviderCooldown {
 mod tests {
     #[test]
     fn breaker_key_is_provider_and_model() {
-        assert_eq!(breaker_key("freellm", "gpt-oss-120b"), "freellm/gpt-oss-120b");
+        assert_eq!(
+            breaker_key("freellm", "gpt-oss-120b"),
+            "freellm/gpt-oss-120b"
+        );
     }
 
     #[test]
@@ -522,12 +525,18 @@ mod tests {
         for _ in 0..4 {
             cd.record_failure(&dead, false);
         }
-        assert!(matches!(cd.check(&dead), CooldownVerdict::Reject { .. } | CooldownVerdict::AllowProbe));
+        assert!(matches!(
+            cd.check(&dead),
+            CooldownVerdict::Reject { .. } | CooldownVerdict::AllowProbe
+        ));
         assert_eq!(cd.get_state(&dead), CircuitState::Open);
         assert_eq!(cd.check(&alive), CooldownVerdict::Allow);
         assert_eq!(cd.get_state(&alive), CircuitState::Closed);
         // the same model on another provider is its own circuit too
-        assert_eq!(cd.check(&breaker_key("groq", "gpt-oss-20b")), CooldownVerdict::Allow);
+        assert_eq!(
+            cd.check(&breaker_key("groq", "gpt-oss-20b")),
+            CooldownVerdict::Allow
+        );
     }
 
     #[test]
