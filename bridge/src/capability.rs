@@ -56,7 +56,10 @@ impl CapabilityId {
 
     /// The risk class this capability has in the reference table, or `None` for a name the table does not know.
     pub fn reference_risk(&self) -> Option<RiskClass> {
-        REFERENCE.binary_search_by(|(name, _)| (*name).cmp(self.0.as_str())).ok().map(|i| REFERENCE[i].1)
+        REFERENCE
+            .binary_search_by(|(name, _)| (*name).cmp(self.0.as_str()))
+            .ok()
+            .map(|i| REFERENCE[i].1)
     }
 }
 
@@ -68,7 +71,8 @@ impl FromStr for CapabilityId {
         for part in s.split('.') {
             let mut chars = part.chars();
             let first_ok = chars.next().is_some_and(|c| c.is_ascii_lowercase());
-            if !first_ok || !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+            if !first_ok || !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
                 return Err(CapabilityError::Malformed(s.to_string()));
             }
             parts += 1;
@@ -159,7 +163,6 @@ pub const REFERENCE: &[(&str, RiskClass)] = &[
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use std::path::Path;
 
     fn id(s: &str) -> CapabilityId {
         s.parse().unwrap()
@@ -168,7 +171,12 @@ mod tests {
     #[test]
     fn the_reference_table_is_sorted_and_free_of_duplicates() {
         for pair in REFERENCE.windows(2) {
-            assert!(pair[0].0 < pair[1].0, "{} must sort before {}", pair[0].0, pair[1].0);
+            assert!(
+                pair[0].0 < pair[1].0,
+                "{} must sort before {}",
+                pair[0].0,
+                pair[1].0
+            );
         }
     }
 
@@ -182,11 +190,17 @@ mod tests {
     #[test]
     fn the_reference_table_matches_the_taxonomy_in_the_specification() {
         // Truth rule 1: the document and the code are pinned together. The table in section 04 lists `domain.*` rows.
-        let doc = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/sections/04-app-bridge-and-connectors.md");
-        let text = std::fs::read_to_string(&doc).unwrap_or_else(|e| panic!("{}: {e}", doc.display()));
+        let doc = crate::spec_section("04-app-bridge-and-connectors.md");
+        let text =
+            std::fs::read_to_string(&doc).unwrap_or_else(|e| panic!("{}: {e}", doc.display()));
         let mut documented = BTreeSet::new();
-        let start = text.find("## 2. Capability taxonomy").expect("taxonomy section");
-        let end = text[start..].find("**Every capability declares").expect("end of taxonomy table") + start;
+        let start = text
+            .find("## 2. Capability taxonomy")
+            .expect("taxonomy section");
+        let end = text[start..]
+            .find("**Every capability declares")
+            .expect("end of taxonomy table")
+            + start;
         for line in text[start..end].lines().filter(|l| l.starts_with("| `")) {
             let cells: Vec<&str> = line.split('|').map(str::trim).collect();
             let domain = cells[1].trim_matches('`').trim_end_matches(".*");
@@ -198,13 +212,29 @@ mod tests {
             }
         }
         let coded: BTreeSet<String> = REFERENCE.iter().map(|(n, _)| n.to_string()).collect();
-        assert_eq!(coded, documented, "the code table and the specification's taxonomy disagree");
+        assert_eq!(
+            coded, documented,
+            "the code table and the specification's taxonomy disagree"
+        );
     }
 
     #[test]
     fn names_need_a_domain_and_a_verb() {
-        for bad in ["", "media", "Media.play", "media..play", ".play", "media.", "media.pl ay", "1media.play", "media.play-now"] {
-            assert!(bad.parse::<CapabilityId>().is_err(), "{bad:?} must be rejected");
+        for bad in [
+            "",
+            "media",
+            "Media.play",
+            "media..play",
+            ".play",
+            "media.",
+            "media.pl ay",
+            "1media.play",
+            "media.play-now",
+        ] {
+            assert!(
+                bad.parse::<CapabilityId>().is_err(),
+                "{bad:?} must be rejected"
+            );
         }
         assert_eq!(id("media.playlist.read").domain(), "media");
     }
@@ -219,7 +249,9 @@ mod tests {
     #[test]
     fn severity_follows_declaration_order() {
         assert!(Read < WriteReversible && WriteReversible < WriteIrreversible);
-        assert!(WriteIrreversible < ExternalEffect && ExternalEffect < Financial && Financial < System);
+        assert!(
+            WriteIrreversible < ExternalEffect && ExternalEffect < Financial && Financial < System
+        );
     }
 
     #[test]
@@ -227,7 +259,10 @@ mod tests {
         let original = id("editor.tabs.list");
         let json = serde_json::to_string(&original).unwrap();
         assert_eq!(json, "\"editor.tabs.list\"");
-        assert_eq!(serde_json::from_str::<CapabilityId>(&json).unwrap(), original);
+        assert_eq!(
+            serde_json::from_str::<CapabilityId>(&json).unwrap(),
+            original
+        );
         assert!(serde_json::from_str::<CapabilityId>("\"NOPE\"").is_err());
     }
 }

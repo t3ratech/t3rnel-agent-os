@@ -16,3 +16,22 @@ pub mod category;
 pub mod manifest;
 pub mod policy;
 pub mod ratchet;
+
+/// Locate a plan/spec document by searching `docs/sections/` in every
+/// ancestor of this crate. Works both in the monorepo layout (docs at
+/// `products/os/docs`, sibling of `t3rnel-agent-os`) and when the sections
+/// are vendored at the repository root.
+#[cfg(test)]
+pub(crate) fn spec_section(file: &str) -> std::path::PathBuf {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for dir in manifest_dir.ancestors() {
+        let candidate = dir.join("docs/sections").join(file);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    panic!(
+        "spec section {file} not found in any docs/sections above {}",
+        manifest_dir.display()
+    );
+}
