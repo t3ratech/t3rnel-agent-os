@@ -41,6 +41,7 @@ fn err(e: LifecycleError) -> (StatusCode, String) {
     let code = match &e {
         LifecycleError::Manifest(_) | LifecycleError::MissingEntry(_) => StatusCode::BAD_REQUEST,
         LifecycleError::Signature(_) | LifecycleError::Revoked(_) => StatusCode::FORBIDDEN,
+        LifecycleError::AccountBinding => StatusCode::FORBIDDEN,
         LifecycleError::Quarantined(_, _) => StatusCode::TOO_MANY_REQUESTS,
         LifecycleError::NoPrevious => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -243,5 +244,58 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("org.test.api")));
+    }
+
+    #[tokio::test]
+    async fn account_binding_maps_to_forbidden() {
+        let (app, _home) = test_router();
+        let pkg = tempfile::tempdir().unwrap();
+        // entitlement_account bound to a fingerprint this home will never
+        // produce — signature checks pass (dev mode, unsigned) but the
+        // account binding must refuse with 403, not 500.
+        let manifest = serde_json::json!({
+            "id": "org.test.bound",
+            "version": "1.0.0",
+            "name": "Bound Plugin",
+            "runtime": "process",
+            "entry": "plugin",
+            "migrations": [],
+            "permissions_summary": [],
+            "entitlement_account": "00".repeat(32)
+        });
+        std::fs::write(
+            pkg.path().join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let entry = pkg.path().join("plugin");
+        std::fs::write(&entry, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let res = app
+            .oneshot(
+                Request::post("/api/plugins/install")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "package_path": pkg.path().to_string_lossy(),
+                            "dev_mode": true
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("entitlement_account mismatch"), "got {text}");
     }
 }

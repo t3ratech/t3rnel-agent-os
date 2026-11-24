@@ -169,3 +169,63 @@ State as of this session. The authoritative spec is
   taint columns, Message provenance field, plugin→PluginHost runtime wiring,
   data importers on COPIES, URL parity, private-repo reduction (R4), public
   launch prep (R5).
+
+## Session 12 additions — signed-plugin pipeline proven end-to-end (dev_mode OFF)
+
+- **Signing tooling**: new `crates/t3rnel-runtime/src/plugin_sign.rs` —
+  the missing half of the pipeline (lifecycle only *verifies*). Library
+  API: `ReleaseSigner::generate/load/pubkey_hex/sign_package_dir`,
+  `build_package` (manifest.yaml → manifest.json + payload copy + exec
+  bit), `package_plugin` (build → optional `entitlement_account` binding
+  via `local_plugin_account_fingerprint(account_home)` → sign the exact
+  manifest.json bytes → signature.bin + signer.pub). Source schema is
+  strict (`deny_unknown_fields`); `__pycache__`/`*.pyc`/manifest files are
+  excluded from payload. 7 unit tests: sign→verify→install roundtrip with
+  `dev_mode:false`, tamper→Signature reject, unsigned→Signature reject,
+  wrong-home→AccountBinding, untrusted signer→Signature, keygen
+  overwrite refusal + load roundtrip, bad yaml/missing entry.
+- **xtask**: `cargo run -p xtask -- plugin-keygen --dir <dir>` and
+  `plugin-sign --src <dir> --out <dir> --key <key> [--account-home <home>]`.
+  NOT in t3rnel-cli (owner-reserved) — CLI equivalents requested in
+  CLI-WIRING-REQUESTS.md.
+- **Reference plugins signed as PIPELINE PROOF ONLY** (Python v0.1
+  scaffolding — operator decided no Python plugins ship; these packages
+  in `/mnt/ext4_work/scratch/plugin-proof/packages/` are NOT shippable):
+  research, trading, hand-pack all built+signed+account-bound to scratch
+  home-a. Release keypair generated at
+  `/mnt/ext4_work/scratch/plugin-proof/keys/` (throwaway proof key —
+  real release-key custody is TUF/isolation/transparency-log work per
+  guide §14.11, still future).
+- **Live verification, dev_mode OFF** (scratch T3RNEL_HOMEs, real
+  `target/debug/t3rnel start` daemons, `plugin_dev_mode` unset → false,
+  `plugin_trusted_signers=[release pubkey]`):
+  - POST /api/plugins/install ×3 → **HTTP 201**, `signed:true`,
+    `dev_mode:false`, `account_bound:true`, correct signer hex.
+  - Tampered manifest.json (version bump post-sign) → **403**
+    `ed25519 verify failed`.
+  - Unsigned package → **403** `signature.bin missing`; same with
+    `"dev_mode":true` in the request body → still **403** (host dev_mode
+    OFF ignores the flag — the b6a7776 fix holds).
+  - Same account-bound package installed on a DIFFERENT T3RNEL_HOME →
+    **403** `entitlement_account mismatch` (AccountBinding).
+  - `GET /api/plugins` on home-a lists all 3; `dev_mode:false`, no
+    dev_mode_warning; daemon logs contain zero DEV MODE banners.
+- **Fix shipped with the proof**: `plugin_admin::err` mapped
+  `AccountBinding` to HTTP 500 (catch-all) — now **403 Forbidden** like
+  Signature/Revoked; new route test
+  `account_binding_maps_to_forbidden` asserts status+body. Verified live
+  (was 500, now 403).
+- **buf/protoc unblocked**: `/mnt/ext4_work/tools/bin/{buf,protoc}`
+  (buf 1.47.2, libprotoc 29.3). `buf build` PASSES — plugin.proto
+  compiles, WKTs resolve. `buf lint` baseline = 81 STANDARD naming
+  findings (Service-suffix/RPC naming) — expected on the pre-freeze
+  draft; recorded in NEEDS-FROM-TOOLS.md (now resolved). `buf generate`
+  still needs `protoc-gen-es` for the TS client.
+- Checks: `cargo check`/`test -p t3rnel-runtime plugin_sign` (7 pass)/
+  `test -p t3rnel-api plugin_admin` (2 pass)/`clippy -p t3rnel-runtime
+  -p xtask -p t3rnel-api --all-targets -D warnings` clean; rustfmt on
+  touched files only; stub_gate 0 on touched files; test binaries
+  deleted; scratch daemons stopped; live `~/.t3rnel` daemon untouched.
+- STILL OPEN: `t3rnel plugin` CLI (owner), gRPC dispatch via buf
+  generate + tonic, release-key custody (TUF §14.11), real (non-Python)
+  reference plugin implementations.

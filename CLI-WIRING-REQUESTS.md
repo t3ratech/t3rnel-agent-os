@@ -47,9 +47,26 @@ per-customer manifest) and embeds it before signing.
   `plugin_sandbox::scoped_argv` + `confined_command`
 - `t3rnel plugin dev <dir>` (9.8) → unsigned dev-mode install + watch
 
+## Plugin signing CLI commands to add (crates/t3rnel-cli — owner reserved)
+
+The signing pipeline exists as a LIBRARY (`t3rnel_runtime::plugin_sign`)
+plus `cargo run -p xtask -- plugin-keygen|plugin-sign` today; expose it in
+the real CLI:
+
+- `t3rnel plugin keygen --dir <dir>` → `ReleaseSigner::generate` — writes
+  `release-signing.key` (0600) + `release-signing.pub`; prints the pubkey
+  for `plugin_trusted_signers`.
+- `t3rnel plugin sign --src <plugin-src-dir> --out <pkg-dir> --key <key-file>
+  [--account-home <t3rnel-home>]` → `package_plugin` — parses
+  `manifest.yaml`, writes `manifest.json` + payload + `signature.bin` +
+  `signer.pub`; `--account-home` binds `entitlement_account` to that home's
+  fingerprint before signing.
+
 ## gRPC plugin dispatch (blocked)
 
-`proto/t3rnel/plugin/v1/plugin.proto` is written but cannot be compiled —
-`buf`/`protoc` are not installed (see NEEDS-FROM-TOOLS.md). Once available:
-run `buf generate` to produce tonic stubs, then implement the dispatch layer
-that routes plugin callback streams to `PluginHost`/`PluginServices`.
+`proto/t3rnel/plugin/v1/plugin.proto` compiles (`buf build` passes;
+`buf`/`protoc` installed at `/mnt/ext4_work/tools/bin` — see
+NEEDS-FROM-TOOLS.md for the lint baseline). Next: run `buf generate`
+(needs `protoc-gen-es` for the TS client) to produce tonic stubs, then
+implement the dispatch layer that routes plugin callback streams to
+`PluginHost`/`PluginServices`.

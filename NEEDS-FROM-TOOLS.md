@@ -1,20 +1,23 @@
-# NEEDS: buf / protoc not installed on this machine
+# NEEDS-FROM-TOOLS — resolved: buf / protoc now installed
 
-Step R2 §9.1 requires `buf lint` and `buf breaking` for
-`proto/t3rnel/plugin/v1/plugin.proto`. Neither `buf` nor `protoc` is installed
-(`which buf protoc` finds nothing; `/mnt/ext4_work/tools/bin` does not exist).
+RESOLVED (this session): `buf` 1.47.2 and `protoc` (libprotoc 29.3) are
+installed at `/mnt/ext4_work/tools/bin` — add it to PATH
+(`export PATH=/mnt/ext4_work/tools/bin:$PATH`) before running buf commands.
 
-The proto file was written by hand following the style of
-`proto/t3rnel/v1/t3rnel.proto`, but **it has not been linted or compiled**.
-Before freezing the contract:
+Verified against `proto/t3rnel/plugin/v1/plugin.proto`:
 
-1. Install `buf` into `/mnt/ext4_work/tools/bin` (owner approval needed per
-   guide §5.6 — it must not touch the root disk).
-2. Run `buf lint` and `buf breaking --against '.git#branch=main'` in
-   `t3rnel-agent-os`.
-3. If `cargo check -p t3rnel-api` later fails on missing `protoc`, the owner
-   must install it (guide §5.6).
+- `buf build` — **passes** (exit 0): the proto is well-formed and all
+  imports (incl. `google/protobuf/{timestamp,empty}.proto` well-known types)
+  resolve via buf's standard includes.
+- `buf lint` — **81 findings, all STANDARD naming conventions** on the draft
+  contract: service names lack the `Service` suffix (e.g. `Http`, `Storage`,
+  `PluginCallbacks`) and RPC request/response types don't follow the
+  `<Service><Method>Request/Response` pattern. This is the recorded lint
+  BASELINE — the proto is explicitly pre-freeze (draft per §9.1), so these
+  are expected. Before freezing the contract either fix the names or add a
+  `buf.yaml` lint exception list; do not silently ignore.
+- `buf breaking --against '.git#branch=main'` — still to run at freeze time
+  (needs a committed baseline; nothing committed yet per owner rule).
 
-Also note: `google/protobuf/timestamp.proto` and `google/protobuf/empty.proto`
-are imported implicitly by buf's standard includes; if the build setup uses a
-vendored proto path, confirm both well-known types resolve.
+Still needed later (not blocking): `protoc-gen-es` for `buf.gen.yaml` TS
+client generation — check `which protoc-gen-es` before running `buf generate`.
