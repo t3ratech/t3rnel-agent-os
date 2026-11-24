@@ -9,6 +9,7 @@ description = "Agent runtime and execution environment for T3rnel"
 t3rnel-types = { path = "../t3rnel-types" }
 t3rnel-memory = { path = "../t3rnel-memory" }
 t3rnel-skills = { path = "../t3rnel-skills" }
+t3rnel-extensions = { path = "../t3rnel-extensions" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -37,6 +38,10 @@ http = "1"
 tokio-tungstenite = "0.24"
 shlex = "1"
 toml = "0.8"
+libc = "0.2"
+hmac = { workspace = true }
+rand = { workspace = true }
+ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

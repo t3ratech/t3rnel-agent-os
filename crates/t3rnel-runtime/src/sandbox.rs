@@ -71,6 +71,11 @@ pub struct GuestState {
     pub tokio_handle: tokio::runtime::Handle,
     /// Hosts allowed to bypass SSRF private-IP checks (from config).
     pub ssrf_allowed_hosts: Vec<String>,
+    /// When set, this guest is a plugin and all egress must go through the
+    /// credential-brokering proxy (manifest-declared hosts/auth only). Its
+    /// presence also disables direct `shell_exec`/`env_read` — plugins use
+    /// host services, never raw process/env access.
+    pub plugin_proxy: Option<Arc<crate::plugin_proxy::PluginProxy>>,
 }
 
 /// Result of executing a WASM module.
@@ -171,6 +176,7 @@ impl WasmSandbox {
                 agent_id: agent_id.to_string(),
                 tokio_handle,
                 ssrf_allowed_hosts: config.ssrf_allowed_hosts.clone(),
+                plugin_proxy: None,
             },
         );
 

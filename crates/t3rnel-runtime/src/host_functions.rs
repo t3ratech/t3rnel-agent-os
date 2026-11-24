@@ -214,6 +214,42 @@ fn host_fs_list(state: &GuestState, params: &serde_json::Value) -> serde_json::V
 // ---------------------------------------------------------------------------
 
 fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
+    // Plugin boundary: egress only via the credential-brokering proxy, which
+    // enforces manifest-declared hosts/methods/paths and auth schemes.
+    if let Some(proxy) = &state.plugin_proxy {
+        let url = match params.get("url").and_then(|u| u.as_str()) {
+            Some(u) => u,
+            None => return json!({"error": "Missing 'url' parameter"}),
+        };
+        let method = params
+            .get("method")
+            .and_then(|m| m.as_str())
+            .unwrap_or("GET")
+            .to_string();
+        let body = params
+            .get("body")
+            .and_then(|b| b.as_str())
+            .map(|b| b.as_bytes().to_vec());
+        let req = crate::plugin_proxy::ProxyRequest {
+            url: url.to_string(),
+            method,
+            headers: Default::default(),
+            body,
+            content_length: None,
+            transfer_encoding_chunked: false,
+        };
+        return match state.tokio_handle.block_on(proxy.request(&req)) {
+            Ok(resp) => json!({
+                "ok": {
+                    "status": resp.status,
+                    "headers": resp.headers,
+                    "body": String::from_utf8_lossy(&resp.body),
+                    "blocked_redirects": resp.blocked_redirects,
+                }
+            }),
+            Err(e) => json!({"error": format!("proxy refused: {e}")}),
+        };
+    }
     let url = match params.get("url").and_then(|u| u.as_str()) {
         Some(u) => u,
         None => return json!({"error": "Missing 'url' parameter"}),
@@ -263,6 +299,9 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
 // ---------------------------------------------------------------------------
 
 fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
+    if state.plugin_proxy.is_some() {
+        return json!({"error": "shell_exec is not available to plugins; use declared host services"});
+    }
     let command = match params.get("command").and_then(|c| c.as_str()) {
         Some(c) => c,
         None => return json!({"error": "Missing 'command' parameter"}),
@@ -303,6 +342,9 @@ fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json
 // ---------------------------------------------------------------------------
 
 fn host_env_read(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
+    if state.plugin_proxy.is_some() {
+        return json!({"error": "env_read is not available to plugins; secrets resolve only via the proxy"});
+    }
     let name = match params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => return json!({"error": "Missing 'name' parameter"}),
@@ -464,7 +506,71 @@ mod tests {
             agent_id: "test-agent".to_string(),
             tokio_handle: tokio::runtime::Handle::current(),
             ssrf_allowed_hosts: Vec::new(),
+            plugin_proxy: None,
         }
+    }
+
+    fn plugin_state_with(handle: tokio::runtime::Handle) -> GuestState {
+        let resolver = std::sync::Arc::new(crate::plugin_proxy::ClosureResolver(|name: &str| {
+            Err(crate::plugin_proxy::ProxyError::SecretUnavailable(
+                name.to_string(),
+            ))
+        }));
+        GuestState {
+            capabilities: vec![
+                Capability::NetConnect("*".to_string()),
+                Capability::ShellExec("*".to_string()),
+                Capability::EnvRead("*".to_string()),
+            ],
+            kernel: None,
+            agent_id: "plugin".to_string(),
+            tokio_handle: handle,
+            ssrf_allowed_hosts: Vec::new(),
+            plugin_proxy: Some(std::sync::Arc::new(crate::plugin_proxy::PluginProxy::new(
+                "org.test.p",
+                vec![],
+                vec![],
+                resolver,
+            ))),
+        }
+    }
+
+    #[test]
+    fn test_plugin_net_fetch_goes_through_proxy_not_direct() {
+        // Empty egress => proxy refuses before any network I/O, even though
+        // the guest holds a wildcard NetConnect capability. Sync test: the
+        // host fn block_on's the proxy future on the runtime handle.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let state = plugin_state_with(rt.handle().clone());
+        let result = host_net_fetch(&state, &serde_json::json!({"url": "https://example.com/"}));
+        assert!(
+            result["error"].as_str().unwrap().contains("proxy refused"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plugin_shell_exec_and_env_read_are_refused() {
+        let state = plugin_state_with(tokio::runtime::Handle::current());
+        let r = host_shell_exec(&state, &serde_json::json!({"command": "id"}));
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("not available to plugins"),
+            "{r}"
+        );
+        let r = host_env_read(&state, &serde_json::json!({"name": "HOME"}));
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("not available to plugins"),
+            "{r}"
+        );
     }
 
     #[tokio::test]
