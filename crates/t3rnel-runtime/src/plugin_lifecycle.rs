@@ -21,11 +21,90 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
+use crate::audit::{AuditAction, AuditLog};
 use crate::plugin_storage::{validate_plugin_id, PluginStorage, StorageError};
+
+/// Central dev-mode warning banner — THE single source of truth reused by
+/// the lifecycle logger, the REST metadata, the boot warning, and docs.
+/// Keep it loud: dev mode bypasses package signing.
+pub const DEV_MODE_WARNING: &str = "⚠ DEV MODE: unsigned plugin packages are accepted — \
+     signing verification and signer trust are BYPASSED. NOT safe for production. \
+     Only enable `plugin_dev_mode` for local development.";
+
+/// Boot-time multi-line warning emitted once when `plugin_dev_mode` is on.
+pub const DEV_MODE_BOOT_WARNING: &str =
+    "============================================================\n\
+     ⚠⚠⚠  PLUGIN DEV MODE ENABLED  ⚠⚠⚠\n\
+     ------------------------------------------------------------\n\
+     Unsigned plugin packages will be installed WITHOUT signature checks.\n\
+     Any package dropped into the plugins directory can execute code.\n\n\
+     This mode is for LOCAL DEVELOPMENT ONLY. Disable `plugin_dev_mode`\n\
+     in config.toml before exposing this daemon to anyone else.\n\
+     ============================================================";
+
+/// Per-action dev-mode banner used in WARN logs and audit details.
+pub fn dev_mode_banner(action: &str, plugin_id: &str, version: &str, signed: bool) -> String {
+    let what = if signed {
+        format!("plugin {plugin_id} v{version}")
+    } else {
+        format!("UNSIGNED plugin {plugin_id} v{version}")
+    };
+    format!("⚠ DEV MODE: {what} {action} — {DEV_MODE_WARNING}")
+}
+
+/// Filename of the per-install random key that anchors the plugin account
+/// fingerprint. Lives directly under the T3rnel home; the raw bytes are never
+/// exposed — only their SHA-256-derived fingerprint is compared.
+const ACCOUNT_KEY_FILE: &str = "plugin-account.key";
+/// Domain separator so the fingerprint can never collide with other hashes
+/// of the same key material.
+const ACCOUNT_FP_DOMAIN: &str = "t3rnel-plugin-account-v1";
+
+/// Stable account/machine fingerprint for plugin entitlement binding.
+///
+/// Derived from a 32-byte random key persisted at `<home>/plugin-account.key`
+/// (created on first use, mode 0600) plus the canonical home path, so copying
+/// the key to a different install path yields a different fingerprint. The raw
+/// key is never returned or logged — only this hash is.
+///
+/// This is the minimal account-identity primitive: there is no central account
+/// service, so "the account" is defined as "this T3rnel install". A manifest's
+/// `entitlement_account` must equal this value or install/update is refused.
+pub fn local_plugin_account_fingerprint(home: &Path) -> Result<String, LifecycleError> {
+    let key_path = home.join(ACCOUNT_KEY_FILE);
+    let key: Vec<u8> = if key_path.exists() {
+        fs::read(&key_path)?
+    } else {
+        let mut k = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut k);
+        fs::create_dir_all(home)?;
+        fs::write(&key_path, k)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
+        }
+        k.to_vec()
+    };
+    if key.len() != 32 {
+        return Err(LifecycleError::Manifest(format!(
+            "{ACCOUNT_KEY_FILE} is corrupt ({} bytes, expected 32)",
+            key.len()
+        )));
+    }
+    let canon = fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let mut h = Sha256::new();
+    h.update(ACCOUNT_FP_DOMAIN.as_bytes());
+    h.update(canon.to_string_lossy().as_bytes());
+    h.update(&key);
+    Ok(hex::encode(h.finalize()))
+}
 
 /// Minimal manifest the lifecycle needs. The full bridge manifest (capabilities,
 /// auth rules, data classes) is validated by `t3rnel-bridge`; this struct carries
@@ -50,6 +129,14 @@ pub struct PluginManifestLite {
     /// Permission summary lines shown at install time (from the full manifest).
     #[serde(default)]
     pub permissions_summary: Vec<String>,
+    /// Optional per-account binding: the signer commits to a specific local
+    /// account fingerprint (see [`local_plugin_account_fingerprint`]). Because
+    /// this field lives inside the signed manifest bytes, it cannot be
+    /// stripped or swapped without invalidating the signature. When present,
+    /// install/update REFUSES on any machine whose fingerprint differs —
+    /// enforced even in dev mode.
+    #[serde(default)]
+    pub entitlement_account: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +171,8 @@ pub enum LifecycleError {
     NoPrevious,
     #[error("package missing entry point {0:?}")]
     MissingEntry(String),
+    #[error("plugin is bound to a different account/machine (entitlement_account mismatch)")]
+    AccountBinding,
 }
 
 #[derive(Debug, Clone)]
@@ -117,17 +206,32 @@ pub struct InstallReport {
     pub migrations_run: Vec<i64>,
     pub signed: bool,
     pub signer: Option<String>,
+    /// True when the install ran under plugin dev mode (unsigned allowed).
+    pub dev_mode: bool,
+    /// True when the manifest carried an `entitlement_account` binding that
+    /// matched this install's account fingerprint.
+    pub account_bound: bool,
 }
 
 pub struct PluginManager {
     home: PathBuf,
+    /// Optional main audit chain — dev-mode lifecycle events are mirrored here
+    /// as `PluginLifecycle` entries in addition to the per-plugin audit table.
+    audit: Option<Arc<AuditLog>>,
 }
 
 impl PluginManager {
     pub fn new(home: &Path) -> Self {
         PluginManager {
             home: home.to_path_buf(),
+            audit: None,
         }
+    }
+
+    /// Attach the kernel's main audit chain so dev-mode plugin events land in
+    /// the tamper-evident log, not only the per-plugin audit table.
+    pub fn set_audit_log(&mut self, audit: Arc<AuditLog>) {
+        self.audit = Some(audit);
     }
 
     pub fn plugins_dir(&self) -> PathBuf {
@@ -197,6 +301,44 @@ impl PluginManager {
         vk.verify(manifest_bytes, &sig)
             .map_err(|_| LifecycleError::Signature("ed25519 verify failed".into()))?;
         Ok(Some(signer_hex))
+    }
+
+    /// Per-account entitlement binding: when the manifest declares
+    /// `entitlement_account`, the local install fingerprint MUST match.
+    /// Enforced regardless of dev_mode — the binding is the point.
+    fn check_entitlement(&self, manifest: &PluginManifestLite) -> Result<(), LifecycleError> {
+        let Some(expected) = &manifest.entitlement_account else {
+            return Ok(());
+        };
+        let local = local_plugin_account_fingerprint(&self.home)?;
+        if local != *expected {
+            return Err(LifecycleError::AccountBinding);
+        }
+        Ok(())
+    }
+
+    /// Dev-mode loudness: WARN-level banner log + per-plugin audit entry +
+    /// main audit chain entry. Called for every install/update performed with
+    /// `dev_mode` enabled.
+    fn emit_dev_mode_event(&self, action: &str, manifest: &PluginManifestLite, signed: bool) {
+        let kind = format!("plugin.dev_mode.{action}");
+        let banner = dev_mode_banner(action, &manifest.id, &manifest.version, signed);
+        tracing::warn!("{banner}");
+        if let Ok(storage) = PluginStorage::open(&self.home, &manifest.id) {
+            let _ = storage.audit_append(&kind, &format!("{}@{}", manifest.id, manifest.version));
+        }
+        if let Some(audit) = &self.audit {
+            audit.record(
+                "plugin",
+                AuditAction::PluginLifecycle,
+                format!("{kind}: {}@{}", manifest.id, manifest.version),
+                if signed {
+                    "dev_mode signed"
+                } else {
+                    "dev_mode UNSIGNED"
+                },
+            );
+        }
     }
 
     /// Verify the package has its entry point and copy it into `dest`
@@ -275,6 +417,7 @@ impl PluginManager {
             .map_err(|_| LifecycleError::Manifest("manifest.json missing".into()))?;
         let manifest = Self::read_manifest(pkg)?;
         let signer = self.verify_signature(pkg, &manifest_bytes, opts)?;
+        self.check_entitlement(&manifest)?;
         let staging = self.staging_dir(&manifest.id);
         self.stage_package(pkg, &manifest, &staging)?;
         let final_dir = self.install_dir(&manifest.id);
@@ -291,6 +434,9 @@ impl PluginManager {
         if let Ok(storage) = PluginStorage::open(&self.home, &manifest.id) {
             let _ = storage.audit_append("lifecycle.install", &manifest.version);
         }
+        if opts.dev_mode {
+            self.emit_dev_mode_event("install", &manifest, signer.is_some());
+        }
         Ok(InstallReport {
             plugin_id: manifest.id.clone(),
             version: manifest.version.clone(),
@@ -299,6 +445,8 @@ impl PluginManager {
             migrations_run,
             signed: signer.is_some(),
             signer,
+            dev_mode: opts.dev_mode,
+            account_bound: manifest.entitlement_account.is_some(),
         })
     }
 
@@ -313,6 +461,7 @@ impl PluginManager {
             .map_err(|_| LifecycleError::Manifest("manifest.json missing".into()))?;
         let manifest = Self::read_manifest(pkg)?;
         let signer = self.verify_signature(pkg, &manifest_bytes, opts)?;
+        self.check_entitlement(&manifest)?;
         let current = self.install_dir(&manifest.id);
         if !current.exists() {
             return Err(LifecycleError::Manifest(format!(
@@ -377,6 +526,9 @@ impl PluginManager {
         if let Ok(storage) = PluginStorage::open(&self.home, &manifest.id) {
             let _ = storage.audit_append("lifecycle.update", &manifest.version);
         }
+        if opts.dev_mode {
+            self.emit_dev_mode_event("update", &manifest, signer.is_some());
+        }
         Ok(InstallReport {
             plugin_id: manifest.id.clone(),
             version: manifest.version.clone(),
@@ -385,6 +537,8 @@ impl PluginManager {
             migrations_run,
             signed: signer.is_some(),
             signer,
+            dev_mode: opts.dev_mode,
+            account_bound: manifest.entitlement_account.is_some(),
         })
     }
 
@@ -574,6 +728,7 @@ mod tests {
                 sql: "CREATE TABLE t (id INTEGER PRIMARY KEY)".into(),
             }],
             permissions_summary: vec!["capability: fs.read".into(), "host: api.example.com".into()],
+            entitlement_account: None,
         };
         let bytes = serde_json::to_vec(&manifest).unwrap();
         fs::write(pkg.join("manifest.json"), &bytes).unwrap();
@@ -701,6 +856,7 @@ mod tests {
                 },
             ],
             permissions_summary: vec![],
+            entitlement_account: None,
         };
         fs::write(
             pkg_v2.join("manifest.json"),
@@ -768,5 +924,156 @@ mod tests {
         mgr.uninstall("org.test.rm").unwrap();
         assert!(mgr.list().is_empty());
         assert!(!mgr.install_dir("org.test.rm").exists());
+    }
+
+    #[test]
+    fn dev_mode_install_emits_loud_audit_events() {
+        let home = tempfile::tempdir().unwrap();
+        let mut mgr = PluginManager::new(home.path());
+        let audit = Arc::new(AuditLog::new());
+        mgr.set_audit_log(audit.clone());
+        let src = tempfile::tempdir().unwrap();
+        let pkg = make_pkg(src.path(), "org.test.devaudit", "1.0.0", false);
+        let opts = InstallOptions {
+            require_signature: false,
+            trusted_keys: vec![],
+            dev_mode: true,
+        };
+        let report = mgr.install(&pkg, &opts).unwrap();
+        assert!(report.dev_mode);
+        assert!(!report.account_bound);
+        // Main audit chain got a PluginLifecycle entry with the dotted kind.
+        let entries = audit.recent(10);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].action, AuditAction::PluginLifecycle));
+        assert!(entries[0].detail.contains("plugin.dev_mode.install"));
+        assert!(entries[0].detail.contains("org.test.devaudit"));
+        // Per-plugin audit trail got the same kind.
+        let storage = PluginStorage::open(home.path(), "org.test.devaudit").unwrap();
+        let plugin_audit = storage.audit_tail(50).unwrap();
+        assert!(plugin_audit
+            .iter()
+            .any(|(_, action, _)| action == "plugin.dev_mode.install"));
+    }
+
+    #[test]
+    fn non_dev_install_emits_no_dev_mode_audit() {
+        let home = tempfile::tempdir().unwrap();
+        let mgr = PluginManager::new(home.path());
+        let src = tempfile::tempdir().unwrap();
+        let pkg = make_pkg(src.path(), "org.test.nodev", "1.0.0", false);
+        let opts = InstallOptions {
+            require_signature: false,
+            trusted_keys: vec![],
+            dev_mode: false,
+        };
+        let report = mgr.install(&pkg, &opts).unwrap();
+        assert!(!report.dev_mode);
+        let storage = PluginStorage::open(home.path(), "org.test.nodev").unwrap();
+        let plugin_audit = storage.audit_tail(50).unwrap();
+        assert!(!plugin_audit
+            .iter()
+            .any(|(_, action, _)| action.starts_with("plugin.dev_mode")));
+    }
+
+    fn make_bound_pkg(dir: &Path, id: &str, entitlement: &str, sign: bool) -> PathBuf {
+        let pkg = dir.join(format!("pkg-{id}-bound"));
+        fs::create_dir_all(&pkg).unwrap();
+        let manifest = PluginManifestLite {
+            id: id.into(),
+            version: "1.0.0".into(),
+            name: format!("Bound {id}"),
+            description: String::new(),
+            runtime: "process".into(),
+            entry: "plugin".into(),
+            migrations: vec![],
+            permissions_summary: vec![],
+            entitlement_account: Some(entitlement.into()),
+        };
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        fs::write(pkg.join("manifest.json"), &bytes).unwrap();
+        let entry = pkg.join("plugin");
+        fs::write(&entry, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        if sign {
+            let sk = SigningKey::from_bytes(&[9u8; 32]);
+            let sig = sk.sign(&bytes);
+            fs::write(pkg.join("signature.bin"), sig.to_bytes()).unwrap();
+            fs::write(
+                pkg.join("signer.pub"),
+                hex::encode(sk.verifying_key().to_bytes()),
+            )
+            .unwrap();
+        }
+        pkg
+    }
+
+    #[test]
+    fn entitlement_account_match_installs_mismatch_refuses() {
+        let home = tempfile::tempdir().unwrap();
+        let mgr = PluginManager::new(home.path());
+        let src = tempfile::tempdir().unwrap();
+        let local_fp = local_plugin_account_fingerprint(home.path()).unwrap();
+        // Matching fingerprint → install succeeds and is flagged account_bound.
+        let good = make_bound_pkg(src.path(), "org.test.bound", &local_fp, true);
+        let trusted = {
+            let sk = SigningKey::from_bytes(&[9u8; 32]);
+            hex::encode(sk.verifying_key().to_bytes())
+        };
+        let opts = InstallOptions {
+            require_signature: true,
+            trusted_keys: vec![trusted],
+            dev_mode: false,
+        };
+        let report = mgr.install(&good, &opts).unwrap();
+        assert!(report.account_bound);
+        assert!(report.signed);
+        // Mismatched fingerprint → refused even with a valid signature.
+        let bad = make_bound_pkg(
+            src.path(),
+            "org.test.wrongacct",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            true,
+        );
+        assert!(matches!(
+            mgr.install(&bad, &opts),
+            Err(LifecycleError::AccountBinding)
+        ));
+        // Binding is enforced in dev mode too (unsigned package, wrong account).
+        let bad_dev = make_bound_pkg(
+            src.path(),
+            "org.test.wrongacct2",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            false,
+        );
+        let dev_opts = InstallOptions {
+            require_signature: false,
+            trusted_keys: vec![],
+            dev_mode: true,
+        };
+        assert!(matches!(
+            mgr.install(&bad_dev, &dev_opts),
+            Err(LifecycleError::AccountBinding)
+        ));
+        // Fingerprint is stable across calls and never equals the raw key.
+        assert_eq!(
+            local_plugin_account_fingerprint(home.path()).unwrap(),
+            local_fp
+        );
+        assert_ne!(local_fp.len(), 32); // hex sha256, not raw key bytes
+    }
+
+    #[test]
+    fn dev_mode_banner_is_loud_and_centralized() {
+        assert!(DEV_MODE_WARNING.contains("DEV MODE"));
+        assert!(DEV_MODE_WARNING.contains("NOT safe for production"));
+        assert!(DEV_MODE_BOOT_WARNING.contains("PLUGIN DEV MODE ENABLED"));
+        let b = dev_mode_banner("install", "org.x", "1.0.0", false);
+        assert!(b.contains("UNSIGNED plugin org.x"));
+        assert!(b.contains("DEV MODE"));
     }
 }

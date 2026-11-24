@@ -240,6 +240,7 @@ mod tests {
             entry: "plugin".into(),
             migrations: vec![],
             permissions_summary: vec![],
+            entitlement_account: None,
         };
         fs::write(
             pkg.join("manifest.json"),

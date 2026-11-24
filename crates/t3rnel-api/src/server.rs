@@ -1100,11 +1100,11 @@ pub async fn build_router(
             axum::routing::post(routes::self_improvement_halt),
         )
         .layer(axum::middleware::from_fn_with_state(
-            auth_state,
+            auth_state.clone(),
             middleware::auth,
         ))
         .layer(axum::middleware::from_fn_with_state(
-            gcra_limiter,
+            gcra_limiter.clone(),
             rate_limiter::gcra_rate_limit,
         ))
         .layer(axum::middleware::from_fn(middleware::security_headers))
@@ -1114,7 +1114,65 @@ pub async fn build_router(
         .layer(cors)
         .with_state(state.clone());
 
+    // ------------------------------------------------------------------
+    // Plugin admin routes (9.7): /api/plugins{,/{id},/install,/update,
+    // /rollback,/launch-check}. The router carries its own
+    // PluginAdminState, so it is merged AFTER `.with_state(state)` — axum
+    // only merges routers with identical state types. The same middleware
+    // stack (auth → rate limit → security headers → request logging) is
+    // re-applied so these routes are not less protected than the rest.
+    // ------------------------------------------------------------------
+    if kernel.config.plugin_dev_mode {
+        // EXTREMELY LOUD: dev mode disables package signature verification.
+        warn!(
+            "{}",
+            t3rnel_runtime::plugin_lifecycle::DEV_MODE_BOOT_WARNING
+        );
+    }
+    let mut plugin_mgr =
+        t3rnel_runtime::plugin_lifecycle::PluginManager::new(&kernel.config.home_dir);
+    plugin_mgr.set_audit_log(kernel.audit_log.clone());
+    let plugin_opts = t3rnel_runtime::plugin_lifecycle::InstallOptions {
+        require_signature: !kernel.config.plugin_dev_mode,
+        trusted_keys: resolve_plugin_trusted_signers(&kernel.config.plugin_trusted_signers),
+        dev_mode: kernel.config.plugin_dev_mode,
+    };
+    let plugin_router = crate::plugin_admin::router(Arc::new(plugin_mgr), plugin_opts)
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state.clone(),
+            middleware::auth,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            gcra_limiter.clone(),
+            rate_limiter::gcra_rate_limit,
+        ))
+        .layer(axum::middleware::from_fn(middleware::security_headers))
+        .layer(axum::middleware::from_fn(middleware::request_logging));
+    let app = app.merge(plugin_router);
+
     (app, state)
+}
+
+/// Resolve `plugin_trusted_signers` config entries into signer pubkey hex.
+/// Each entry may be a 64-char hex pubkey OR a filesystem path to a file
+/// containing one (whitespace-trimmed). Unreadable paths are kept verbatim —
+/// they simply won't match any signer, which fails closed.
+fn resolve_plugin_trusted_signers(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|e| {
+            let trimmed = e.trim();
+            let path = Path::new(trimmed);
+            if path.is_file() {
+                std::fs::read_to_string(path)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|_| trimmed.to_string())
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Initialize opentelemetry tracing if `OTEL_EXPORTER_OTLP_ENDPOINT` is set.

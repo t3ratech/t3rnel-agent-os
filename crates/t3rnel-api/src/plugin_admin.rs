@@ -18,7 +18,9 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use t3rnel_runtime::plugin_lifecycle::{InstallOptions, LifecycleError, PluginManager};
+use t3rnel_runtime::plugin_lifecycle::{
+    InstallOptions, LifecycleError, PluginManager, DEV_MODE_WARNING,
+};
 
 #[derive(Clone)]
 pub struct PluginAdminState {
@@ -64,21 +66,41 @@ pub fn router(manager: Arc<PluginManager>, opts: InstallOptions) -> Router {
         })
 }
 
+/// Resolve the effective install options for a request. A `dev_mode` flag in
+/// the request body is honoured ONLY when the host itself runs with
+/// `plugin_dev_mode` — production hosts ignore it entirely.
+fn effective_opts(st: &PluginAdminState, req_dev_mode: bool) -> InstallOptions {
+    let mut opts = st.install_opts.clone();
+    if req_dev_mode && st.install_opts.dev_mode {
+        opts.dev_mode = true;
+        opts.require_signature = false;
+    }
+    opts
+}
+
 async fn list_plugins(State(st): State<PluginAdminState>) -> impl IntoResponse {
-    Json(serde_json::json!({ "plugins": st.manager.list() }))
+    let dev_mode = st.install_opts.dev_mode;
+    Json(serde_json::json!({
+        "plugins": st.manager.list(),
+        // Persistent, machine-readable dev-mode warning — any UI or agent that
+        // lists plugins sees that this host accepts unsigned packages.
+        "dev_mode": dev_mode,
+        "dev_mode_warning": if dev_mode { Some(DEV_MODE_WARNING) } else { None },
+        "dev_mode_banner": if dev_mode {
+            Some(format!(
+                "⚠ DEV MODE: plugin dev mode ENABLED on this host — {DEV_MODE_WARNING}"
+            ))
+        } else {
+            None
+        },
+    }))
 }
 
 async fn install_plugin(
     State(st): State<PluginAdminState>,
     Json(req): Json<InstallRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let mut opts = st.install_opts.clone();
-    // Dev-mode flag from the request can only RELAX signature requirements
-    // when the host itself runs dev builds; production hosts ignore it.
-    if req.dev_mode {
-        opts.dev_mode = true;
-        opts.require_signature = false;
-    }
+    let opts = effective_opts(&st, req.dev_mode);
     let report = st
         .manager
         .install(PathBuf::from(&req.package_path).as_path(), &opts)
@@ -113,11 +135,7 @@ async fn update_plugin(
     Json(req): Json<InstallRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let _ = id; // update targets the manifest's own id; path must match install
-    let mut opts = st.install_opts.clone();
-    if req.dev_mode {
-        opts.dev_mode = true;
-        opts.require_signature = false;
-    }
+    let opts = effective_opts(&st, req.dev_mode);
     let report = st
         .manager
         .update(PathBuf::from(&req.package_path).as_path(), &opts)

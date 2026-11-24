@@ -1,30 +1,40 @@
 # CLI / server wiring requests (owner-reserved areas — do NOT edit crates/t3rnel-cli)
 
-## Plugin admin REST routes (9.7)
+## Plugin admin REST routes (9.7) — WIRED (server.rs)
 
-`crates/t3rnel-api/src/plugin_admin.rs` provides `plugin_admin::router(manager, opts)`.
-To expose it, in `crates/t3rnel-api/src/server.rs` (or wherever the main
-`Router` is assembled), add approximately:
+DONE in `crates/t3rnel-api/src/server.rs` (`build_router`): the
+`plugin_admin::router` is merged into the axum app after `.with_state(state)`
+(the plugin router carries its own `PluginAdminState`; axum only merges
+identical state types). The auth → GCRA rate-limit → security-headers →
+request-logging middleware stack is re-applied to the plugin router.
 
-```rust
-let plugin_mgr = std::sync::Arc::new(
-    t3rnel_runtime::plugin_lifecycle::PluginManager::new(&config.home),
-);
-let plugin_opts = t3rnel_runtime::plugin_lifecycle::InstallOptions {
-    require_signature: !config.dev_mode,
-    trusted_keys: config.plugin_trusted_signers.clone(), // new config field
-    dev_mode: config.dev_mode,
-};
-router = router.merge(crate::plugin_admin::router(plugin_mgr, plugin_opts));
-```
+Config fields added to `KernelConfig` (`crates/t3rnel-types/src/config.rs`):
+- `plugin_trusted_signers: Vec<String>` — hex pubkeys OR paths to files
+  containing a pubkey (resolved in `server.rs::resolve_plugin_trusted_signers`)
+- `plugin_dev_mode: bool` (default false) — enables unsigned installs and
+  turns on the extremely-loud dev-mode warnings (boot banner, per-install
+  WARN log, `plugin.dev_mode.*` audit events in both the plugin audit table
+  and the main Merkle audit chain, `dev_mode`/`dev_mode_warning` fields in
+  `GET /api/plugins`, `/api/status`, `/api/health/detail`, `/api/sentinel`).
 
-New config fields needed on the API/kernel config (owner to add):
-- `plugin_trusted_signers: Vec<String>` (ed25519 pubkey hex)
-- `dev_mode: bool` (already may exist for other dev features — reuse)
-
-Endpoints: `GET /api/plugins`, `POST /api/plugins/install`,
+Endpoints live: `GET /api/plugins`, `POST /api/plugins/install`,
 `GET|DELETE /api/plugins/{id}`, `POST /api/plugins/{id}/update`,
 `POST /api/plugins/{id}/rollback`, `GET /api/plugins/{id}/launch-check`.
+
+NOTE: a `dev_mode: true` flag in the install/update request body is now only
+honoured when the HOST runs `plugin_dev_mode` — previously any client could
+relax signature checks (fixed).
+
+## Per-account plugin binding (9.7 addendum)
+
+`PluginManifestLite.entitlement_account` (inside the signed manifest bytes)
+binds a package to `local_plugin_account_fingerprint(home)`
+(`crates/t3rnel-runtime/src/plugin_lifecycle.rs`) — a SHA-256 over a
+domain-separated per-install key at `<home>/plugin-account.key` plus the
+canonical home path. Raw key material is never exposed. Mismatch →
+`LifecycleError::AccountBinding`, enforced even in dev mode. The signer
+computes the fingerprint on the target machine (or the plugin author ships a
+per-customer manifest) and embeds it before signing.
 
 ## CLI commands to add (crates/t3rnel-cli — owner reserved)
 

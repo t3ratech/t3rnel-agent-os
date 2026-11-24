@@ -1721,6 +1721,12 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "home_dir": state.kernel.config.home_dir.display().to_string(),
         "log_level": state.kernel.config.log_level,
         "network_enabled": state.kernel.config.network_enabled,
+        "plugin_dev_mode": state.kernel.config.plugin_dev_mode,
+        "plugin_dev_mode_warning": if state.kernel.config.plugin_dev_mode {
+            Some(t3rnel_runtime::plugin_lifecycle::DEV_MODE_WARNING)
+        } else {
+            None
+        },
         "agents": agents,
     }))
 }
@@ -4805,7 +4811,11 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     .await
     .unwrap_or(false);
 
-    let config_warnings = state.kernel.config.validate();
+    let mut config_warnings = state.kernel.config.validate();
+    // Dev mode is a loud, persistent warning on every diagnostics surface.
+    if state.kernel.config.plugin_dev_mode {
+        config_warnings.push(t3rnel_runtime::plugin_lifecycle::DEV_MODE_WARNING.to_string());
+    }
     let status = if db_ok { "ok" } else { "degraded" };
     let teams = state.team_store.list_teams();
     let team_count = teams.as_ref().map(|teams| teams.len()).unwrap_or(0);
@@ -4864,6 +4874,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "cpu_percent": cpu_percent,
         "database": if db_ok { "connected" } else { "error" },
         "config_warnings": config_warnings,
+        "plugin_dev_mode": state.kernel.config.plugin_dev_mode,
         "team_store_error": team_task_error,
     }))
 }
@@ -19233,7 +19244,7 @@ fn has_status(line: &str, status: u16) -> bool {
 /// credentials, blocked egress, failure bursts — were invisible on every
 /// surface. An operator watching a dashboard had no way to learn the system was
 /// failing except by running a command they had no reason to run.
-pub async fn sentinel_findings() -> impl IntoResponse {
+pub async fn sentinel_findings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use t3rnel_kernel::sentinel::{Event, EventKind, Sentinel, SentinelConfig, Severity};
 
     // Logs are written to the repository's logs/ directory by the scripts and
@@ -19342,6 +19353,14 @@ pub async fn sentinel_findings() -> impl IntoResponse {
         // showing "no findings" for a path that does not exist reads as one.
         "log_dir": log_dir,
         "logs_present": !logs.is_empty(),
+        // Plugin dev mode disables signature verification — surface it on the
+        // security-monitoring endpoint too so no agent misses it.
+        "plugin_dev_mode": state.kernel.config.plugin_dev_mode,
+        "plugin_dev_mode_warning": if state.kernel.config.plugin_dev_mode {
+            Some(t3rnel_runtime::plugin_lifecycle::DEV_MODE_WARNING)
+        } else {
+            None
+        },
     }))
     .into_response()
 }

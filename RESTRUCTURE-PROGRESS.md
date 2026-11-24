@@ -103,9 +103,29 @@ State as of this session. The authoritative spec is
   6 tests pass incl. real ed25519 sign/verify/revoke. `plugin_admin.rs` in
   t3rnel-api — axum router /api/plugins{,/{id},/install,/update,/rollback,
   /launch-check} over PluginManager; mount snippet + CLI command list in
-  CLI-WIRING-REQUESTS.md (server.rs mount NOT done — needs owner config
-  fields plugin_trusted_signers/dev_mode; documented). 1 route test passes.
-  STILL OPEN: server.rs merge line + config fields (owner), gRPC dispatch.
+  CLI-WIRING-REQUESTS.md. 1 route test passes.
+  **WIRED (session 11)**: `server.rs::build_router` merges the plugin router
+  post-`.with_state` (own `PluginAdminState`) and re-applies auth → GCRA →
+  security-headers → request-logging. New `KernelConfig` fields
+  `plugin_trusted_signers: Vec<String>` (hex or file path, resolved in
+  server.rs) and `plugin_dev_mode: bool` (default false). Dev mode is
+  EXTREMELY LOUD: multi-line `DEV_MODE_BOOT_WARNING` at boot, per-install
+  WARN banner via `dev_mode_banner()`, `plugin.dev_mode.{install,update}`
+  events in both the plugin audit table and the main Merkle chain
+  (`AuditAction::PluginLifecycle`), and `dev_mode`/`dev_mode_warning`
+  surfaced in `GET /api/plugins`, `/api/status`, `/api/health/detail`,
+  `/api/sentinel`. SECURITY FIX: request-body `dev_mode:true` is now only
+  honoured when the host runs `plugin_dev_mode` (was: any client could
+  bypass signatures). Per-account binding added:
+  `PluginManifestLite.entitlement_account` vs
+  `local_plugin_account_fingerprint(home)` (SHA-256 over
+  `<home>/plugin-account.key` + canonical home path; raw key never exposed)
+  → `LifecycleError::AccountBinding`, enforced even in dev mode.
+  Verified live: scratch T3RNEL_HOME daemon on :47891, unsigned dev install
+  via POST /api/plugins/install returned `dev_mode:true, signed:false` and
+  both audit trails recorded `plugin.dev_mode.install`. 10 lifecycle +
+  2 config + 1 route tests pass; clippy -D warnings clean on all 4 crates.
+  STILL OPEN: gRPC dispatch; `t3rnel plugin` CLI (owner).
 - ~~9.8 plugin dev loop~~ DONE (core): `plugin_dev.rs` — DevSigner
   (ed25519 keypair under <home>/dev-keys/, sign_package writes the same
   signature.bin/signer.pub the lifecycle verifier checks — dev packages pass

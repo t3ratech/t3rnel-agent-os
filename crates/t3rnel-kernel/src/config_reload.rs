@@ -263,6 +263,18 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
             .push(format!("mode: {:?} -> {:?}", old.mode, new.mode));
     }
 
+    // Plugin admin options are captured once at router build; changes apply
+    // on next daemon start. Report them so the operator knows a restart is
+    // needed for dev_mode / trusted signers to take effect.
+    if old.plugin_dev_mode != new.plugin_dev_mode
+        || old.plugin_trusted_signers != new.plugin_trusted_signers
+    {
+        plan.noop_changes.push(
+            "plugin_dev_mode / plugin_trusted_signers changed (takes effect on daemon restart)"
+                .to_string(),
+        );
+    }
+
     plan
 }
 

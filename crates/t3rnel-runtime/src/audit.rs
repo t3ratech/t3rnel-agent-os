@@ -31,6 +31,9 @@ pub enum AuditAction {
     /// A request refused by the ingress/egress sentinel. Detail carries the
     /// route and finding kinds; the refused payload is never recorded.
     SecurityDenial,
+    /// Plugin package lifecycle event (install/update/rollback). Detail
+    /// carries the dotted event kind, e.g. `plugin.dev_mode.install`.
+    PluginLifecycle,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -142,6 +145,8 @@ impl AuditLog {
                         "AuthAttempt" => AuditAction::AuthAttempt,
                         "WireConnect" => AuditAction::WireConnect,
                         "ConfigChange" => AuditAction::ConfigChange,
+                        "PluginLifecycle" => AuditAction::PluginLifecycle,
+                        "SecurityDenial" => AuditAction::SecurityDenial,
                         _ => AuditAction::ToolInvoke, // fallback
                     };
                     Ok(AuditEntry {

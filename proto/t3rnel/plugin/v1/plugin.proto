@@ -177,10 +177,10 @@ message KvDeleteNamespaceResponse { uint64 deleted = 1; }
 message SqlExecRequest {
   PluginIdentity plugin = 1;
   // Statements separated by ';' is NOT assumed; use SqlExecBatch for that.
-  string statement = 1;
+  string statement = 2;
   // Bound parameters, positional.
-  repeated SqlValue params = 2;
-  uint32 timeout_ms = 3;
+  repeated SqlValue params = 3;
+  uint32 timeout_ms = 4;
 }
 message SqlExecBatchRequest {
   PluginIdentity plugin = 1;

@@ -1419,6 +1419,17 @@ pub struct KernelConfig {
     /// ```
     #[serde(default)]
     pub skills: HashMap<String, HashMap<String, String>>,
+    /// Trusted plugin signer pubkeys (ed25519, hex-encoded 32-byte keys or
+    /// paths to files containing them). When non-empty, only packages signed
+    /// by one of these keys may be installed. Empty = any valid signature is
+    /// accepted (still subject to the revocation list).
+    #[serde(default)]
+    pub plugin_trusted_signers: Vec<String>,
+    /// Plugin development mode. When true, the plugin lifecycle accepts
+    /// UNSIGNED packages and every install/update emits a loud warning —
+    /// this is NEVER safe for production. Default: false.
+    #[serde(default)]
+    pub plugin_dev_mode: bool,
 }
 
 /// Heartbeat monitor settings exposed in `[heartbeat]` config section.
@@ -1703,6 +1714,8 @@ impl Default for KernelConfig {
             workflows_dir: None,
             heartbeat: HeartbeatSettings::default(),
             skills: HashMap::new(),
+            plugin_trusted_signers: Vec::new(),
+            plugin_dev_mode: false,
         }
     }
 }
@@ -1823,6 +1836,11 @@ impl std::fmt::Debug for KernelConfig {
             )
             .field("auth", &format!("enabled={}", self.auth.enabled))
             .field("skills", &format!("{} skill config(s)", self.skills.len()))
+            .field(
+                "plugin_trusted_signers",
+                &format!("{} signer(s)", self.plugin_trusted_signers.len()),
+            )
+            .field("plugin_dev_mode", &self.plugin_dev_mode)
             .finish()
     }
 }
@@ -4200,6 +4218,31 @@ mod tests {
         };
         assert_eq!(config.mode, KernelMode::Stable);
         assert_eq!(config.language, "ar");
+    }
+
+    #[test]
+    fn test_plugin_config_defaults() {
+        let config = KernelConfig::default();
+        assert!(!config.plugin_dev_mode);
+        assert!(config.plugin_trusted_signers.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_config_toml_parse() {
+        let toml = r#"
+plugin_dev_mode = true
+plugin_trusted_signers = ["deadbeef", "/path/to/signer.pub"]
+"#;
+        let config: KernelConfig = toml::from_str(toml).unwrap();
+        assert!(config.plugin_dev_mode);
+        assert_eq!(
+            config.plugin_trusted_signers,
+            vec!["deadbeef".to_string(), "/path/to/signer.pub".to_string()]
+        );
+        // Omitted fields fall back to safe defaults.
+        let bare: KernelConfig = toml::from_str("").unwrap();
+        assert!(!bare.plugin_dev_mode);
+        assert!(bare.plugin_trusted_signers.is_empty());
     }
 
     #[test]
