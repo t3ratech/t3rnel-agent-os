@@ -34,10 +34,11 @@ fn hex_val(b: u8) -> Option<u8> {
 
 pub mod channel_bridge;
 pub mod grpc;
-pub mod middleware;
 pub mod memory_routes;
+pub mod middleware;
 pub mod openai_compat;
 pub mod pending_actions;
+pub mod plugin_admin;
 pub mod team_store;
 pub mod pb {
     tonic::include_proto!("t3rnel.v1");
