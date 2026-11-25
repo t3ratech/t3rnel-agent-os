@@ -14,8 +14,25 @@ pub const MANIFEST_VERSION: &str = "1.0";
 /// The host services a plugin may require (04 §14.2). `requires` keys must
 /// come from this list; the core refuses an install it cannot satisfy.
 pub const HOST_SERVICES: &[&str] = &[
-    "http", "storage", "memory", "tools", "routes", "schedule", "events", "approval", "llm",
-    "sentinel", "ui", "agents", "notify", "audit",
+    "http",
+    "storage",
+    "memory",
+    "tools",
+    "routes",
+    "schedule",
+    "events",
+    "approval",
+    "llm",
+    "sentinel",
+    "ui",
+    "agents",
+    "notify",
+    "audit",
+    // `conversations` and `briefing` are the §18 additions: the conversation
+    // service (threads, approval bindings, notification fan-out) and the
+    // morning-briefing collector are host services a comms plugin requires.
+    "conversations",
+    "briefing",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,12 +100,17 @@ pub struct Application {
 }
 
 /// How the registry recognises the application; at least one must be given.
+/// `service` names a core host service instead of an installable app — used
+/// by connectors that extend a core service (e.g. `conversations`) rather
+/// than bridge a desktop application (18 §8).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Detect {
     pub desktop_entry: Option<String>,
     pub windows_app: Option<String>,
     pub macos_bundle: Option<String>,
+    #[serde(default)]
+    pub service: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,10 +484,11 @@ impl Manifest {
             }
         }
         let d = &self.application.detect;
-        if [&d.desktop_entry, &d.windows_app, &d.macos_bundle]
+        let app_detected = [&d.desktop_entry, &d.windows_app, &d.macos_bundle]
             .iter()
-            .all(|v| v.as_deref().is_none_or(|s| s.trim().is_empty()))
-        {
+            .any(|v| v.as_deref().is_some_and(|s| !s.trim().is_empty()));
+        let service_detected = d.service.as_deref().is_some_and(|s| !s.trim().is_empty());
+        if !app_detected && !service_detected {
             out.push(Violation::NoDetection);
         }
         if !(1..=3).contains(&self.integration.level) {
@@ -792,6 +815,28 @@ mod tests {
         assert_eq!(m.capabilities.len(), 5);
         assert_eq!(m.integration.runtime, Runtime::Process);
         assert_eq!(m.permissions.secrets.required, ["vlc_http_password"]);
+    }
+
+    #[test]
+    fn a_core_service_connector_detects_via_service_not_an_app() {
+        // 18 §8: plugins that extend a core service (e.g. `comms` on
+        // `conversations`) have no installable application to detect; the
+        // `detect.service` field satisfies application detection instead.
+        let yaml = VLC.replace(
+            "  detect:\n    desktop_entry: \"vlc.desktop\"\n    windows_app: \"VideoLAN.VLC\"\n    macos_bundle: \"org.videolan.vlc\"",
+            "  detect:\n    service: \"conversations\"",
+        );
+        let m = Manifest::parse(&yaml).unwrap();
+        assert_eq!(
+            m.application.detect.service.as_deref(),
+            Some("conversations")
+        );
+        // And an empty detect block is still refused.
+        let empty = VLC.replace(
+            "  detect:\n    desktop_entry: \"vlc.desktop\"\n    windows_app: \"VideoLAN.VLC\"\n    macos_bundle: \"org.videolan.vlc\"",
+            "  detect: {}",
+        );
+        assert!(violations_of(&empty).contains(&Violation::NoDetection));
     }
 
     #[test]

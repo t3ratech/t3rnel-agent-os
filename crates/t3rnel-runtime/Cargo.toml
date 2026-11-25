@@ -7,6 +7,7 @@ description = "Agent runtime and execution environment for T3rnel"
 
 [dependencies]
 t3rnel-types = { path = "../t3rnel-types" }
+t3rnel-bridge = { path = "../../bridge" }
 t3rnel-memory = { path = "../t3rnel-memory" }
 t3rnel-skills = { path = "../t3rnel-skills" }
 t3rnel-extensions = { path = "../t3rnel-extensions" }

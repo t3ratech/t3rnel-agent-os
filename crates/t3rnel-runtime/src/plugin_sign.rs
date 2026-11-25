@@ -131,6 +131,13 @@ impl ReleaseSigner {
 /// plugin source directory. Strict: unknown keys are rejected so a field the
 /// signer does not understand can never be silently dropped from the signed
 /// package.
+///
+/// Two schemas are accepted (see [`SourceSpec`]): this lite "package" schema
+/// used by the v0.1 reference plugins, and the full bridge manifest v1
+/// (`manifest_version: "1.0"`, `bridge::manifest::Manifest`) which is the
+/// canonical format per `04-app-bridge-and-connectors.md` §3. A v1 manifest
+/// is validated by `t3rnel-bridge` before it is reduced to the lite
+/// [`PluginManifestLite`] the lifecycle signs.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SourceManifest {
@@ -158,6 +165,34 @@ struct SourceManifest {
 
 fn default_source_entry() -> String {
     "plugin".to_string()
+}
+
+/// A parsed `manifest.yaml`: either the lite package schema or the full
+/// bridge manifest v1. Detected by the presence of `manifest_version`.
+enum SourceSpec {
+    Lite(SourceManifest),
+    V1(t3rnel_bridge::manifest::Manifest),
+}
+
+fn parse_source_manifest(yaml: &str, path: &Path) -> Result<SourceSpec, SignError> {
+    // The lite schema is tried first so its strict errors stay authoritative
+    // for the reference-plugin layout; a `manifest_version` key means the
+    // author intended the canonical v1 schema instead.
+    match serde_yaml::from_str::<SourceManifest>(yaml) {
+        Ok(m) => Ok(SourceSpec::Lite(m)),
+        Err(lite_err) => {
+            if yaml.contains("manifest_version") {
+                t3rnel_bridge::manifest::Manifest::parse(yaml)
+                    .map(SourceSpec::V1)
+                    .map_err(|e| SignError::Manifest(format!("{}: {e}", path.display())))
+            } else {
+                Err(SignError::Manifest(format!(
+                    "{}: {lite_err}",
+                    path.display()
+                )))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,6 +290,91 @@ fn permissions_summary(src: &SourceManifest) -> Vec<String> {
     lines
 }
 
+/// Reduce a validated bridge manifest v1 to the lite manifest the lifecycle
+/// signs. The v1 schema carries no `entry` or `description`, so the package
+/// entry is the contract default (`plugin`) — v1 plugin sources must ship
+/// their executable under that name.
+fn lite_from_v1(m: &t3rnel_bridge::manifest::Manifest) -> PluginManifestLite {
+    use t3rnel_bridge::manifest::Runtime as V1Runtime;
+    let runtime = match m.integration.runtime {
+        V1Runtime::Wasm => "wasm",
+        V1Runtime::Process => "process",
+        V1Runtime::InApp => "in-app",
+    };
+    let mut lines = Vec::new();
+    if !m.capabilities.is_empty() {
+        lines.push(format!(
+            "capabilities: {}",
+            m.capabilities
+                .iter()
+                .map(|c| c.id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    for rule in &m.permissions.auth {
+        let scheme = match rule.scheme {
+            t3rnel_bridge::manifest::AuthScheme::Bearer => "bearer",
+            t3rnel_bridge::manifest::AuthScheme::Header => "header",
+            t3rnel_bridge::manifest::AuthScheme::Basic => "basic",
+            t3rnel_bridge::manifest::AuthScheme::QueryKey => "query-key",
+            t3rnel_bridge::manifest::AuthScheme::HmacSha256 => "hmac-sha256",
+            t3rnel_bridge::manifest::AuthScheme::AwsSigV4 => "aws-sigv4",
+        };
+        lines.push(format!(
+            "auth: {} via {} → {}",
+            rule.secret,
+            scheme,
+            if rule.hosts.is_empty() {
+                "(any host)".to_string()
+            } else {
+                rule.hosts.join(", ")
+            }
+        ));
+    }
+    if !m.permissions.data_classes.is_empty() {
+        lines.push(format!(
+            "data classes: {}",
+            m.permissions
+                .data_classes
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !m.permissions.network.hosts.is_empty() {
+        lines.push(format!(
+            "network hosts: {}",
+            m.permissions.network.hosts.join(", ")
+        ));
+    }
+    if !m.requires.is_empty() {
+        lines.push(format!(
+            "requires host services: {}",
+            m.requires
+                .iter()
+                .map(|(k, v)| format!("{k} {v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !m.plugin.targets.is_empty() {
+        lines.push(format!("targets: {}", m.plugin.targets.join(", ")));
+    }
+    PluginManifestLite {
+        id: m.plugin.id.clone(),
+        version: m.plugin.version.clone(),
+        name: m.plugin.name.clone(),
+        description: String::new(),
+        runtime: runtime.to_string(),
+        entry: default_source_entry(),
+        migrations: Vec::new(),
+        permissions_summary: lines,
+        entitlement_account: None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Package build + sign
 // ---------------------------------------------------------------------------
@@ -268,6 +388,7 @@ fn is_payload_excluded(rel: &Path) -> bool {
         name.as_str(),
         "manifest.yaml" | "manifest.json" | "signature.bin" | "signer.pub"
     ) || name == "__pycache__"
+        || name == "target"
         || name.ends_with(".pyc")
         || name.starts_with(".git")
 }
@@ -317,19 +438,23 @@ pub fn build_package(src: &Path, dst: &Path) -> Result<PluginManifestLite, SignE
     let yaml_path = src.join("manifest.yaml");
     let yaml = fs::read_to_string(&yaml_path)
         .map_err(|_| SignError::Manifest(format!("{} missing", yaml_path.display())))?;
-    let src_manifest: SourceManifest = serde_yaml::from_str(&yaml)
-        .map_err(|e| SignError::Manifest(format!("{}: {e}", yaml_path.display())))?;
+    let spec = parse_source_manifest(&yaml, &yaml_path)?;
 
-    let lite = PluginManifestLite {
-        id: src_manifest.id.clone(),
-        version: src_manifest.version.clone(),
-        name: src_manifest.name.clone(),
-        description: src_manifest.description.clone(),
-        runtime: runtime_for(&src_manifest.plugin.kind)?,
-        entry: src_manifest.entry.clone(),
-        migrations: Vec::new(),
-        permissions_summary: permissions_summary(&src_manifest),
-        entitlement_account: None,
+    let lite = match &spec {
+        SourceSpec::Lite(src_manifest) => PluginManifestLite {
+            id: src_manifest.id.clone(),
+            version: src_manifest.version.clone(),
+            name: src_manifest.name.clone(),
+            description: src_manifest.description.clone(),
+            runtime: runtime_for(&src_manifest.plugin.kind)?,
+            entry: src_manifest.entry.clone(),
+            migrations: Vec::new(),
+            permissions_summary: permissions_summary(src_manifest),
+            entitlement_account: None,
+        },
+        // `Manifest::parse` already ran full v1 validation (capabilities,
+        // auth scoping, data classes, requires, security flags).
+        SourceSpec::V1(m) => lite_from_v1(m),
     };
 
     if dst.exists() {
@@ -578,6 +703,97 @@ requires:
         let key_path = kd.join("release-signing.key");
         let s2 = ReleaseSigner::load(&key_path).unwrap();
         assert_eq!(s1.pubkey_hex(), s2.pubkey_hex());
+    }
+
+    /// A bridge manifest v1 `manifest.yaml` (04 §3) is validated by
+    /// `t3rnel-bridge` and reduced to the lite signed manifest; the package
+    /// entry is the contract default `plugin`.
+    #[test]
+    fn v1_manifest_is_validated_and_signed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("manifest.yaml"),
+            r#"
+manifest_version: "1.0"
+plugin:
+  id: "org.test.v1conn"
+  type: "connector"
+  name: "V1 Connector"
+  version: "1.2.3"
+  min_t3rnel_version: "0.6.4"
+  targets: ["linux-x86_64"]
+  publisher: "t3rnel"
+  licence: "Apache-2.0"
+application:
+  id: "t3rnel.test-service"
+  detect:
+    service: "test-service"
+  supported_versions: ">=1"
+integration:
+  level: 2
+  transport: "host-services"
+  runtime: "process"
+capabilities:
+  - id: comms.thread.read
+permissions:
+  filesystem: { read: [], write: [] }
+  network: { default: deny, hosts: [] }
+  secrets: { required: [] }
+  auth: []
+  data_classes: ["public"]
+security:
+  signed: true
+  audit: true
+  update_requires_reapproval_if: ["new_capability", "new_permission", "new_network_host"]
+tests:
+  conformance: "tests/conformance.yaml"
+requires:
+  notify: ">=1"
+  conversations: ">=1"
+"#,
+        )
+        .unwrap();
+        fs::write(src.join("plugin"), b"#!/bin/sh\nexit 0\n").unwrap();
+        // Rust-plugin build output must never be copied into a package.
+        fs::create_dir_all(src.join("target/debug")).unwrap();
+        fs::write(src.join("target/debug/junk"), b"junk").unwrap();
+
+        let dst = tmp.path().join("pkg");
+        let signer = ReleaseSigner::generate(&key_dir(tmp.path())).unwrap();
+        let report = package_plugin(&src, &dst, &signer, None).unwrap();
+        assert_eq!(report.plugin_id, "org.test.v1conn");
+        assert_eq!(report.version, "1.2.3");
+        assert!(!report.account_bound);
+        let lite: serde_json::Value =
+            serde_json::from_slice(&fs::read(dst.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(lite["runtime"], "process");
+        assert_eq!(lite["entry"], "plugin");
+        let summary = lite["permissions_summary"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(summary.contains("comms.thread.read"), "{summary}");
+        assert!(summary.contains("notify >=1"), "{summary}");
+        assert!(summary.contains("conversations >=1"), "{summary}");
+        assert!(!dst.join("target").exists());
+
+        // An invalid v1 manifest (unknown capability) is refused at sign time.
+        let bad = tmp.path().join("bad");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(
+            bad.join("manifest.yaml"),
+            fs::read_to_string(src.join("manifest.yaml"))
+                .unwrap()
+                .replace("comms.thread.read", "comms.not.a.capability"),
+        )
+        .unwrap();
+        fs::write(bad.join("plugin"), b"x").unwrap();
+        assert!(build_package(&bad, &tmp.path().join("badpkg")).is_err());
     }
 
     #[test]

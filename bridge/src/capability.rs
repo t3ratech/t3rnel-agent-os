@@ -118,6 +118,13 @@ pub const REFERENCE: &[(&str, RiskClass)] = &[
     ("browser.read", Read),
     ("browser.screenshot", Read),
     ("browser.tabs.list", Read),
+    // comms.* — the 2-way messaging plugin domain
+    // (docs/sections/18 §8 step 3). Sending anything over a channel is an
+    // external effect; reading thread state is a read.
+    ("comms.approval.request", ExternalEffect),
+    ("comms.message.reply", ExternalEffect),
+    ("comms.notify.send", ExternalEffect),
+    ("comms.thread.read", Read),
     ("diagnostics.read", Read),
     ("doc.edit", WriteReversible),
     ("doc.export", WriteReversible),
