@@ -306,3 +306,69 @@ wrap is §7 step 4); gRPC tonic dispatch for `BriefingQuery`/
 `StatusQuery`/`Auth` pending buf generate; `RoutedInbound::AgentMessage`
 resolution returns the target but no agent-dispatch consumer yet;
 briefing approval bindings target only the first linked account.
+
+## WhatsApp ChannelAdapter — spec §7 step 4 (2026-11-25, uncommitted)
+
+First real `ChannelAdapter` impls behind the §3 contract, wrapping the
+existing Baileys gateway + Cloud API surface. No commits/pushes.
+
+**New code**
+- `crates/t3rnel-runtime/src/channels/whatsapp.rs` (+ `channels/whatsapp/tests.rs`):
+  - `WhatsAppAdapter` (`"whatsapp"`) — personal/QR mode. `connect` resolves
+    the gateway URL (explicit > `GatewayStarter` closure wired to
+    `t3rnel_kernel::whatsapp_gateway::ensure_gateway_running` >
+    `WHATSAPP_WEB_GATEWAY_URL`), health-checks `/health`, reads `/linked`,
+    and retains declared vault secrets zeroized. Session creds = gateway
+    `auth_store` (never vault, never plugin-visible). `send` →
+    `POST /message/send` (+ `/file`, `/notify` image for attachments);
+    `poll_inbound` → `GET /inbound/events?since=` normalized to
+    `ConversationEvent` (channel `whatsapp`, thread key = chat id/group JID
+    or DM phone, tainted `untrusted`/`personal` provenance, media
+    placeholders → attachment handles). `needs_linking` state machine:
+    `Offline | NeedsLinking | Linked | Connected`; sends fail with an
+    actionable QR-flow error until linked. Capabilities: text+media
+    (inbound placeholders, file/image outbound), threads (groups), no
+    buttons, no receipts.
+  - `WhatsAppBusinessAdapter` (`"whatsapp-business"`) — Cloud API mode:
+    vault-brokered `*:access-token` / `*:verify-token` /
+    `*:phone-number-id` secrets (declared via `secret_names` on the linked
+    account), send via `graph.facebook.com/v21.0/{pnid}/messages` (4096-char
+    chunking, https-link media), inbound via Meta webhook POSTs normalized
+    into shared `BusinessWebhookState` (bounded 1024 queue) drained by
+    `poll_inbound`. `is_configured()` fails the webhook closed until
+    connect resolves credentials.
+- `packages/whatsapp-gateway/index.js`: bounded inbound ring
+  (`recordInboundEvent`, clock-seeded monotonic `seq` surviving restarts),
+  every authorized inbound message buffered pre-routing; new loopback-only
+  `GET /inbound/events?since&limit` returning `{events, latest, linked,
+  connected, number}`. `node --check` + 23 gateway unit tests pass.
+- `crates/t3rnel-api/src/conversations.rs`: registers both adapters in
+  `build_conversation_stack` (personal always — starter wired to kernel;
+  auto-links account `whatsapp:default` when `[channels.whatsapp]` is
+  configured OR `whatsapp-gateway/auth_store/creds.json` exists, since the
+  QR flow predates the registry; business when `phone_number_id` set, no
+  auto-link). New `ConversationState.whatsapp_business` + routes
+  `GET|POST /api/conversations/channels/whatsapp-business/webhook`
+  (verify-token handshake + payload ingest, fail-closed).
+- `crates/t3rnel-runtime/Cargo.toml`: `axum` dev-dep for mock-server tests.
+
+**Checks:** `cargo check`/`clippy -p t3rnel-runtime -p t3rnel-api
+--all-targets -D warnings` clean (scoped systemd-run, -j1);
+`cargo test -p t3rnel-runtime --lib channels::whatsapp` 10/10 pass;
+`cargo test -p t3rnel-api --lib conversations` 6/6 pass; rustfmt
+edition-2021 on touched files; no stub markers; test binaries deleted.
+
+**Left / known gaps:**
+- Gateway still forwards messages to agents directly (`forwardToT3rnel`)
+  AND the adapter now surfaces the same messages as ConversationEvents —
+  double-processing until the legacy forward path is retired or gated.
+- Inbound media is placeholder text + message-id handle only; the gateway
+  has no media-download endpoint yet.
+- `/inbound/events` seq is clock-seeded per boot; buffer is in-memory so a
+  gateway restart drops undelivered events (cursor still consistent).
+- Business webhook has no `X-Hub-Signature-256` validation (no app-secret
+  config exists); verify-token handshake + loopback bind are the current
+  trust anchors — add app-secret signing before exposing publicly.
+- Live gateway smoke not run (needs `npm install` of baileys; unit tests
+  cover the HTTP contract against a mock).
+- Telegram adapter is §7 step 5+ (not this task).

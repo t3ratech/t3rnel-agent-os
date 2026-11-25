@@ -34,6 +34,9 @@ pub struct ConversationState {
     pub service: Arc<ConversationService>,
     pub briefing: Arc<BriefingService>,
     pub channels: Arc<ChannelRegistry>,
+    /// Shared webhook inbox for the WhatsApp Business (Cloud API) adapter —
+    /// `Some` only when `[channels.whatsapp] phone_number_id` is configured.
+    pub whatsapp_business: Option<Arc<t3rnel_runtime::channels::whatsapp::BusinessWebhookState>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +221,13 @@ pub fn router(state: ConversationState) -> Router {
         .route(
             "/api/conversations/channels/accounts/{channel}/{account}",
             axum::routing::delete(unlink_account),
+        )
+        // WhatsApp Business Cloud API webhook (18 §3/§7): Meta GET
+        // verification handshake + POST message events. Registered always;
+        // handlers fail closed when the adapter is not configured.
+        .route(
+            "/api/conversations/channels/whatsapp-business/webhook",
+            get(wa_business_verify).post(wa_business_events),
         )
         // Briefing
         .route("/api/briefing/run", post(run_briefing))
@@ -517,6 +527,58 @@ async fn unlink_account(
     }
 }
 
+// -- WhatsApp Business webhook (Cloud API mode, 18 §3/§7) ----------------------
+//
+// Meta calls these unauthenticated-by-design endpoints; the verify-token
+// handshake plus the vault-brokered access token are the trust anchors.
+// Payloads are normalized into ConversationEvents (tainted `untrusted`)
+// and drained by the adapter's poll_inbound on the regular tick.
+
+async fn wa_business_verify(
+    State(st): State<ConversationState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(biz) = &st.whatsapp_business else {
+        return (
+            StatusCode::NOT_FOUND,
+            "whatsapp-business channel not configured",
+        )
+            .into_response();
+    };
+    let mode = q.get("hub.mode").map(String::as_str).unwrap_or("");
+    let token = q.get("hub.verify_token").map(String::as_str).unwrap_or("");
+    let challenge = q.get("hub.challenge").cloned().unwrap_or_default();
+    if mode == "subscribe" && biz.verify_token_matches(token) {
+        (StatusCode::OK, challenge).into_response()
+    } else {
+        (StatusCode::FORBIDDEN, "verify token mismatch").into_response()
+    }
+}
+
+async fn wa_business_events(
+    State(st): State<ConversationState>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let Some(biz) = &st.whatsapp_business else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "whatsapp-business channel not configured".to_string(),
+        ));
+    };
+    if !biz.is_configured() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "whatsapp-business credentials not connected — link the account first"
+                .to_string(),
+        ));
+    }
+    let ingested = biz.ingest(&payload);
+    Ok(Json(
+        serde_json::json!({ "ok": true, "ingested": ingested }),
+    ))
+}
+
 // -- briefing ----------------------------------------------------------------
 
 async fn run_briefing(State(st): State<ConversationState>) -> Result<impl IntoResponse, String> {
@@ -614,6 +676,58 @@ pub fn build_conversation_stack(
         linked_at: chrono::Utc::now(),
     });
 
+    // -- WhatsApp adapters (docs/sections/18 §7 step 4) --------------------
+    //
+    // Personal mode wraps the Baileys gateway: the kernel process manager
+    // (`ensure_gateway_running`) resolves/starts the gateway and returns its
+    // loopback URL. The session credential is the gateway's own auth_store —
+    // never a vault secret, never plugin-visible.
+    let wa_kernel = kernel.clone();
+    let wa_starter: t3rnel_runtime::channels::whatsapp::GatewayStarter = Arc::new(move || {
+        let k = wa_kernel.clone();
+        Box::pin(async move { t3rnel_kernel::whatsapp_gateway::ensure_gateway_running(&k).await })
+    });
+    let whatsapp =
+        t3rnel_runtime::channels::whatsapp::WhatsAppAdapter::new().with_starter(wa_starter);
+    registry.register_adapter(Arc::new(whatsapp));
+
+    // Auto-link the personal account when WhatsApp is configured OR a
+    // linked session already exists on disk (the QR flow predates the
+    // channel registry — a stored auth_store IS the link). Account "default"
+    // is the single gateway session; the linked phone number is reported by
+    // the adapter's link state, not by the account id.
+    let wa_configured = kernel.config.channels.whatsapp.is_some();
+    let wa_session_exists = home
+        .join("whatsapp-gateway")
+        .join("auth_store")
+        .join("creds.json")
+        .exists();
+    if wa_configured || wa_session_exists {
+        let _ = registry.link_account(LinkedAccount {
+            channel: "whatsapp".to_string(),
+            account: "default".into(),
+            label: Some("whatsapp (personal)".into()),
+            secret_names: vec![],
+            linked_at: chrono::Utc::now(),
+        });
+    }
+
+    // Business mode (Cloud API): registered when a phone_number_id is
+    // configured. Credentials are vault secrets declared on the linked
+    // account (`channel:whatsapp-business:<acct>:access-token` etc.) — no
+    // auto-link, since there is nothing to link without secrets.
+    let mut whatsapp_business = None;
+    if let Some(wa_cfg) = kernel.config.channels.whatsapp.as_ref() {
+        if !wa_cfg.phone_number_id.is_empty() {
+            let biz_state = t3rnel_runtime::channels::whatsapp::BusinessWebhookState::new();
+            let biz =
+                t3rnel_runtime::channels::whatsapp::WhatsAppBusinessAdapter::new(biz_state.clone())
+                    .with_phone_number_id(wa_cfg.phone_number_id.clone());
+            registry.register_adapter(Arc::new(biz));
+            whatsapp_business = Some(biz_state);
+        }
+    }
+
     let mut conversations =
         ConversationService::open(home, registry.clone(), Arc::new(PendingApprovalPort))
             .expect("conversation store");
@@ -634,6 +748,7 @@ pub fn build_conversation_stack(
             service: conversations,
             briefing,
             channels: registry,
+            whatsapp_business,
         },
         local,
     )
@@ -811,6 +926,7 @@ mod tests {
             service: conversations,
             briefing,
             channels: registry,
+            whatsapp_business: None,
         };
         Fx {
             _home: home,

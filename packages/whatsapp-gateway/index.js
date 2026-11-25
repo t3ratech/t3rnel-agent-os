@@ -263,6 +263,27 @@ function lookupOutbound(msgId) {
 }
 
 // ---------------------------------------------------------------------------
+// Inbound event buffer — the conversation service's channel adapter polls
+// GET /inbound/events?since=<seq> for normalized inbound messages
+// (docs/sections/18 §3). Bounded ring; `seq` is seeded from the clock at
+// startup so it stays monotonic across gateway restarts (a restarted
+// gateway simply has a fresh, higher seq space — the adapter's `since`
+// cursor keeps working).
+// ---------------------------------------------------------------------------
+const INBOUND_BUFFER_MAX = 500;
+const inboundEvents = [];
+let inboundSeq = Date.now();
+
+/** Record one normalized inbound message for adapter polling. */
+function recordInboundEvent(evt) {
+  inboundSeq += 1;
+  inboundEvents.push({ seq: inboundSeq, ts: Math.floor(Date.now() / 1000), ...evt });
+  if (inboundEvents.length > INBOUND_BUFFER_MAX) {
+    inboundEvents.splice(0, inboundEvents.length - INBOUND_BUFFER_MAX);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Baileys connection
 // ---------------------------------------------------------------------------
 async function startConnection() {
@@ -447,6 +468,20 @@ async function startConnection() {
       }
       const pushName = msg.pushName || phone;
       const replyJid = dmReplyJid(senderJid, remoteJid, isGroup, lidToPhone);
+
+      // Buffer for the conversation-service channel adapter (18 §3). Every
+      // authorized inbound message is recorded — including link-only and
+      // sitesmith-command texts — so threads/approvals see the full stream.
+      recordInboundEvent({
+        id: msg.key?.id || null,
+        chat: remoteJid,
+        sender: senderJid,
+        phone,
+        push_name: pushName,
+        text,
+        is_group: isGroup,
+        ts: Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000),
+      });
 
       // Reactions on tracked outbound messages are decisions (👍 approve,
       // 👎 reject). Handled before text extraction — reactions carry no text.
@@ -1022,6 +1057,24 @@ const server = http.createServer(async (req, res) => {
       } catch (err) {
         return jsonResponse(res, 502, { error: `send failed: ${err.message}` });
       }
+    }
+
+    // GET /inbound/events — normalized inbound feed for the conversation
+    // service's WhatsApp channel adapter (docs/sections/18 §3).
+    // `since` is the last seq the caller consumed; `latest` is the newest
+    // seq issued (callers jump their cursor to it when a page is short).
+    if (req.method === 'GET' && pathname === '/inbound/events') {
+      const since = parseInt(url.searchParams.get('since') || '0', 10) || 0;
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '200', 10) || 200, 500);
+      const events = inboundEvents.filter((e) => e.seq > since).slice(0, limit);
+      const credsExists = fs.existsSync(path.join(__dirname, 'auth_store', 'creds.json'));
+      return jsonResponse(res, 200, {
+        events,
+        latest: inboundSeq,
+        linked: credsExists,
+        connected: connStatus === 'connected',
+        number: credsExists ? linkedNumber() : '',
+      });
     }
 
     // GET /health — health check

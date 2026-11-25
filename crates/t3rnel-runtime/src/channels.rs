@@ -11,6 +11,8 @@
 //! and the per-user linked-account table persisted under
 //! `<home>/channels/accounts.json`.
 
+pub mod whatsapp;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
