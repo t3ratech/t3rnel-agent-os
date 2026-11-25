@@ -6374,6 +6374,9 @@ pub async fn audit_append(
         "authattempt" | "auth_attempt" | "auth" => AuditAction::AuthAttempt,
         "wireconnect" | "wire_connect" | "wire" => AuditAction::WireConnect,
         "configchange" | "config_change" | "config" => AuditAction::ConfigChange,
+        "pluginlifecycle" | "plugin_lifecycle" | "plugin" => AuditAction::PluginLifecycle,
+        "conversation" | "conversations" => AuditAction::Conversation,
+        "securitydenial" | "security_denial" | "denial" => AuditAction::SecurityDenial,
         other => {
             tracing::warn!(
                 "audit_append: unknown event_type {other:?}, falling back to ToolInvoke"

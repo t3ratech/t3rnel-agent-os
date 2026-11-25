@@ -34,6 +34,10 @@ pub enum AuditAction {
     /// Plugin package lifecycle event (install/update/rollback). Detail
     /// carries the dotted event kind, e.g. `plugin.dev_mode.install`.
     PluginLifecycle,
+    /// Conversation-service event (docs/sections/18 §6): inbound routing,
+    /// approval delivery/decision, notification fan-out. Detail carries the
+    /// dotted event kind, e.g. `approval.decide`, `notify.deliver`.
+    Conversation,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -146,6 +150,7 @@ impl AuditLog {
                         "WireConnect" => AuditAction::WireConnect,
                         "ConfigChange" => AuditAction::ConfigChange,
                         "PluginLifecycle" => AuditAction::PluginLifecycle,
+                        "Conversation" => AuditAction::Conversation,
                         "SecurityDenial" => AuditAction::SecurityDenial,
                         _ => AuditAction::ToolInvoke, // fallback
                     };

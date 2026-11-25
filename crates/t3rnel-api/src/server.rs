@@ -1150,6 +1150,60 @@ pub async fn build_router(
         .layer(axum::middleware::from_fn(middleware::request_logging));
     let app = app.merge(plugin_router);
 
+    // ------------------------------------------------------------------
+    // Conversation / approval / briefing routes (docs/sections/18):
+    // /api/conversations/*, /api/conversations/channels*, /api/briefing/*.
+    // (/api/channels itself belongs to the legacy channel-config surface.)
+    // Same post-.with_state merge pattern and middleware stack as plugins.
+    // ------------------------------------------------------------------
+    let (conv_state, _local_channel) = crate::conversations::build_conversation_stack(&kernel);
+    // Connect every linked channel account through the vault broker
+    // (18 §3). Per-account failures are logged, never fatal — the local
+    // dashboard adapter is always present.
+    for (label, result) in conv_state.channels.connect_all().await {
+        match result {
+            Ok(()) => tracing::info!("channel {label} connected"),
+            Err(e) => tracing::warn!("channel {label} connect failed: {e}"),
+        }
+    }
+    // Inbound router loop (18 §2): adapters emit normalized
+    // ConversationEvents via poll_inbound; each is routed to an approval
+    // binding, an agent thread, or stored unbound.
+    {
+        let channels = conv_state.channels.clone();
+        let service = conv_state.service.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                for (id, result) in channels.poll_all().await {
+                    match result {
+                        Ok(events) => {
+                            for event in events {
+                                if let Err(e) = service.handle_inbound(event).await {
+                                    tracing::warn!("inbound route on {id} failed: {e}");
+                                }
+                            }
+                        }
+                        Err(e) => tracing::debug!("channel {id} inbound poll: {e}"),
+                    }
+                }
+            }
+        });
+    }
+    let conv_router = crate::conversations::router(conv_state)
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state.clone(),
+            middleware::auth,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            gcra_limiter.clone(),
+            rate_limiter::gcra_rate_limit,
+        ))
+        .layer(axum::middleware::from_fn(middleware::security_headers))
+        .layer(axum::middleware::from_fn(middleware::request_logging));
+    let app = app.merge(conv_router);
+
     (app, state)
 }
 

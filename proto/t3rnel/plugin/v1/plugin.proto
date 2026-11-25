@@ -718,6 +718,131 @@ service Audit {
 }
 
 // ---------------------------------------------------------------------------
+// Briefing + status — the morning-briefing contract
+// (docs/sections/18-conversations-approvals-and-briefings.md §5)
+// ---------------------------------------------------------------------------
+
+// Health/attention level of a plugin report. UNREACHABLE is assigned by the
+// CORE when a plugin fails to answer BriefingQuery/StatusQuery inside the
+// timeout — a plugin can never claim it for itself.
+enum StatusLevel {
+  STATUS_LEVEL_UNSPECIFIED = 0;
+  STATUS_LEVEL_OK = 1;
+  STATUS_LEVEL_ATTENTION = 2;
+  STATUS_LEVEL_CRITICAL = 3;
+  STATUS_LEVEL_UNREACHABLE = 4;
+}
+
+// One line/item inside a briefing report. `text`, template slots and metric
+// values are tainted untrusted data — core renders them as data, never as
+// instructions (18 §5.1).
+message BriefingItem {
+  // Plugin-chosen stable id within the report (dedup/ordering aid).
+  string id = 1;
+  // Human-readable line, already bounded by the core.
+  string text = 2;
+  // Taint of this item — plugins must mark anything derived from outside.
+  Taint taint = 3;
+  // Optional classification tags, e.g. "orders", "incident".
+  repeated string tags = 4;
+  // Optional name of a core briefing_template this item renders through.
+  // Plugins cannot supply arbitrary markup; they fill named slots only.
+  string template_id = 5;
+  map<string, string> template_slots = 6;
+}
+
+// An item needing a user decision. The core turns each ActionRequest into an
+// approval binding at compile time and writes the binding id back into
+// `approval_binding_id` before delivery — a plugin-supplied value is only an
+// idempotency hint and is never trusted.
+message ActionRequest {
+  // Plugin-chosen id within the report.
+  string id = 1;
+  // Short label shown in the approval inbox, e.g. "Approve payout batch".
+  string label = 2;
+  // Longer detail shown on expansion.
+  string detail = 3;
+  // Risk class driving the approval level.
+  RiskClass risk_class = 4;
+  // Capability being requested, e.g. "payout.batch.send".
+  string capability = 5;
+  // Core-assigned approval-binding id (filled at compile; see above).
+  string approval_binding_id = 6;
+}
+
+// The typed report a plugin returns from BriefingQuery. Fixed schema —
+// plugins never freelance document structure or formatting (18 §5.1).
+message BriefingReport {
+  PluginIdentity plugin = 1;
+  StatusLevel level = 2;
+  repeated BriefingItem items = 3;
+  repeated ActionRequest actions = 4;
+  // "orders_filled": "3" style metrics; rendered as data only.
+  map<string, string> metrics = 5;
+  // One plugin-authored summary line (tainted untrusted).
+  string headline = 6;
+}
+
+// Request the plugin's section of the morning briefing.
+message BriefingQueryRequest {
+  PluginIdentity plugin = 1;
+  // Local report date, YYYY-MM-DD, the briefing covers.
+  string report_date = 2;
+  // Instant the collection started (UTC).
+  google.protobuf.Timestamp as_of = 3;
+}
+
+// Lightweight status poll used by dashboards and the briefing fallback path.
+message StatusQueryRequest {
+  PluginIdentity plugin = 1;
+  // Collect only deltas since this instant; zero means full status.
+  google.protobuf.Timestamp since = 2;
+}
+
+message StatusReport {
+  PluginIdentity plugin = 1;
+  StatusLevel level = 2;
+  string headline = 3;
+  map<string, string> metrics = 4;
+  // Optional longer status detail (bounded by core).
+  string detail = 5;
+}
+
+// ---------------------------------------------------------------------------
+// auth — scoped, short-lived token brokering (18 §8)
+// ---------------------------------------------------------------------------
+
+// A plugin asks the core for a scoped access token. The generalized form of
+// `auth.google.token(scope=…)`: provider + scopes in, a token REFERENCE out.
+// The plugin never receives refresh tokens and never sees raw OAuth material
+// beyond what the credential-brokering proxy injects in flight.
+message AuthTokenRequest {
+  PluginIdentity plugin = 1;
+  // Provider key, e.g. "google", "github", "microsoft", "slack".
+  string provider = 2;
+  // Scopes requested; must be a subset of the stored grant's scopes.
+  repeated string scopes = 3;
+  // Requested lifetime cap in seconds; the core bounds this (default 300,
+  // hard max 3600) and further caps it at the stored grant's expiry.
+  uint32 ttl_seconds = 4;
+}
+
+message AuthTokenResponse {
+  // Opaque reference the plugin may present where a credential is expected
+  // (e.g. "authref:v1:google:..."). Resolvable only host-side.
+  string token_ref = 1;
+  google.protobuf.Timestamp expires_at = 2;
+  // Scopes actually granted (subset of requested, intersected with stored).
+  repeated string granted_scopes = 3;
+  // Token type, always "Bearer" for now.
+  string token_type = 4;
+}
+
+service Auth {
+  rpc Token(AuthTokenRequest) returns (AuthTokenResponse);
+}
+
+// ---------------------------------------------------------------------------
 // PluginCallbacks — implemented BY the plugin, called BY the core
 // ---------------------------------------------------------------------------
 
@@ -818,4 +943,9 @@ service PluginCallbacks {
   rpc OnEvent(EventDelivery) returns (EventAck);
   rpc RenderView(ViewRequest) returns (ViewResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
+  // Morning-briefing collection (18 §5). The core invokes this on every
+  // installed plugin in parallel; non-responders are reported UNREACHABLE.
+  rpc BriefingQuery(BriefingQueryRequest) returns (BriefingReport);
+  // Lightweight status poll for dashboards / briefing fallback.
+  rpc StatusQuery(StatusQueryRequest) returns (StatusReport);
 }

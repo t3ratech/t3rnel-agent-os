@@ -137,6 +137,15 @@ impl PluginHost {
         self.storage.audit_tail(limit)
     }
 
+    /// `auth` host service (18 §8): scoped, short-lived token brokering.
+    /// The plugin-facing surface returns only opaque `authref:` references;
+    /// [`crate::plugin_auth::ScopedTokenService::resolve`] stays host-side.
+    /// Vault-scoped to this plugin host's broker — grants live under
+    /// `oauth:<provider>` and are shared with the core consent flow.
+    pub fn auth(&self) -> crate::plugin_auth::ScopedTokenService {
+        crate::plugin_auth::ScopedTokenService::new(self.vault.clone())
+    }
+
     /// `storage` host service KV surface.
     pub fn storage_get(
         &self,

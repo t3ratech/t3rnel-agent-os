@@ -229,3 +229,80 @@ State as of this session. The authoritative spec is
 - STILL OPEN: `t3rnel plugin` CLI (owner), gRPC dispatch via buf
   generate + tonic, release-key custody (TUF §14.11), real (non-Python)
   reference plugin implementations.
+
+## Section 18 core — conversations / approvals / briefings (verified + completed 2026-11-25)
+
+Prior agent's uncommitted work verified, gaps fixed, proven live on a
+scratch `T3RNEL_HOME` daemon (port 14321; live `~/.t3rnel` daemon on
+50051 untouched, no commits made).
+
+**What was already there:** `conversations.rs` (inbound router,
+approval binding w/ policy re-check + single-use + expiry + defer cap,
+notification fan-out w/ templates/quiet-hours/rate limits, thread
+store), `channels.rs` (`ChannelAdapter` trait, `ChannelRegistry`,
+`BrokeredCreds` vault-scoped resolution, `LocalChannel`), `briefing.rs`
+(collect→compile→deliver→store, UNREACHABLE-on-timeout, approval-binding
+of ActionRequests, `briefing:<date>` memory key), `plugin_auth.rs`
+(scoped `authref:` tokens, scope-subset enforcement, TTL caps, vault
+refresh), proto `BriefingReport`/`BriefingQuery`/`StatusQuery`/
+`StatusReport`/`Auth`, API routes + `PendingApprovalPort` over the
+pending-actions ledger.
+
+**Fixed this session:**
+- `briefing.rs`: plugin queries were SEQUENTIAL — spec §5.3 requires
+  parallel; both `run()` collect and `collect_status()` now use
+  `futures::future::join_all` (order preserved).
+- `server.rs`: adapters were never connected and no inbound loop
+  existed — `connect_all()` now runs at router build (per-account
+  failures logged) and a 5s `poll_all()`→`handle_inbound` task feeds
+  the router. Without this every send failed `NotConnected`.
+- **Route collision (live-caught)**: `/api/channels` GET already
+  belonged to the legacy channel-config surface → axum panicked
+  "Overlapping method route" at boot. Conversation channel routes moved
+  to `/api/conversations/channels*`; tests updated.
+- `plugin_host.rs`: `PluginHost::auth()` exposes `ScopedTokenService`
+  over the host vault (the §8 host-service seam for the future gRPC
+  dispatch).
+- `t3rnel-api/Cargo.toml`: added `zeroize` dev-dep (test fixture).
+- api `conversations.rs`: briefing 404s map to NOT_FOUND (was 500);
+  test fixture `set_vault` ordering fixed for `Arc<ChannelRegistry>`;
+  clippy fixes (needless borrow, map-identity, field-reassign).
+- clippy `-D warnings` clean on both crates; `#[allow(too_many_arguments)]`
+  on `deliver_approval`/`bind_action` per repo convention; single_match
+  refactored to `if`.
+
+**Live proof (scratch daemon, `T3RNEL_HOME=/tmp/t3rnel-conv-uG9j`):**
+- `GET /api/conversations/channels` + `/accounts` → local:dashboard
+  adapter + linked account (secret_names only).
+- `POST /inbound` "hello" → thread created; `GET /threads` shows it.
+- `POST /approvals/deliver` (no ref) → registered real `P-1` in
+  pending-actions, binding `AB-000002` delivered via connected local
+  channel.
+- `POST /inbound` "YES" → `ApprovalDecided`; binding `approved`;
+  `pending-actions.json` shows `P-1 state=approved decided_by=
+  local:dashboard:...`; second "YES" falls through to agent route
+  (single-use proven).
+- `POST /api/conversations/notify` → `{"Ok":null}` delivery.
+- `POST /api/briefing/run` → doc with core section (pending_approvals
+  metric from live ledger); `GET /api/briefing/latest|/{date}` 200,
+  missing date → 404; `GET /api/briefing/status` OK.
+- Audit chain (`audit_entries` table) records `Conversation` actions:
+  `approval.deliver`, `approval.decide ... via=local:dashboard:...`,
+  `notify.deliver ... corr=Some("briefing:2026-11-25")` — all hashed.
+- Briefing persisted to `briefings/2026-11-25.json` AND unified memory
+  `briefing:2026-11-25` (verified in `unified_records`).
+
+**Checks:** `cargo check`/`clippy -p t3rnel-runtime -p t3rnel-api
+--all-targets -D warnings` clean; `cargo test -p t3rnel-runtime --lib`
+filtered (conversations|channels|briefing|plugin_auth) 21 pass;
+`cargo test -p t3rnel-api --lib conversations` 6 pass; `buf build` OK;
+`buf lint` new findings match the recorded STANDARD naming baseline;
+`protoc -Iproto -I/mnt/ext4_work/tools/include` descriptor OK;
+rustfmt edition-2021 on touched files; stub_gate 0 on all touched
+files; test binaries deleted; scratch daemon stopped.
+
+**Still open (not this task):** no real channel adapters yet (whatsapp
+wrap is §7 step 4); gRPC tonic dispatch for `BriefingQuery`/
+`StatusQuery`/`Auth` pending buf generate; `RoutedInbound::AgentMessage`
+resolution returns the target but no agent-dispatch consumer yet;
+briefing approval bindings target only the first linked account.

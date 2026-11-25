@@ -33,6 +33,7 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 pub mod channel_bridge;
+pub mod conversations;
 pub mod grpc;
 pub mod memory_routes;
 pub mod middleware;
