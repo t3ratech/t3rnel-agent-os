@@ -33,6 +33,11 @@ pub const HOST_SERVICES: &[&str] = &[
     // morning-briefing collector are host services a comms plugin requires.
     "conversations",
     "briefing",
+    // `auth` is the §18 §8 scoped-token broker (`auth.token(provider,
+    // scope)`): plugins receive opaque `authref:` references for OAuth
+    // grants core owns (e.g. the shared Google broker); token material never
+    // crosses the plugin boundary.
+    "auth",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

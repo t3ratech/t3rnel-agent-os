@@ -18,7 +18,56 @@ use std::sync::{Arc, Mutex};
 use t3rnel_extensions::vault::CredentialVault;
 use zeroize::Zeroizing;
 
+use crate::plugin_auth::StoredGrant;
 use crate::plugin_proxy::{ProxyError, SecretResolver};
+
+/// Secret-name prefix that resolves to the *current access token* of a
+/// stored OAuth grant. Grants live in the vault under `oauth:<provider>`
+/// (written host-side by the core consent flow through
+/// [`crate::plugin_auth::ScopedTokenService::store_grant`]); a manifest
+/// `permissions.auth` rule may bind `oauth-access:<provider>` so the
+/// credential-brokering proxy injects `Authorization: Bearer <token>` for
+/// the plugin's declared hosts — this is how the Google connector plugins
+/// (18 §8) authenticate without ever holding token material.
+///
+/// Resolution is fail-closed: an expired grant is `SecretUnavailable` until
+/// the host refreshes it — the plugin triggers that by calling the `auth`
+/// host service (`auth.token(provider, scopes)` runs `ensure_fresh`
+/// host-side) before its API calls.
+pub const OAUTH_ACCESS_PREFIX: &str = "oauth-access:";
+
+/// Same expiry skew [`crate::plugin_auth::ScopedTokenService`] uses so a
+/// token never dies mid-request.
+const OAUTH_ACCESS_SKEW_SECS: i64 = 30;
+
+/// Resolve `oauth-access:<provider>` to the stored grant's access token.
+/// `ref_name` is the full secret name, used only for error reporting.
+fn resolve_oauth_access(
+    broker: &VaultBroker,
+    provider: &str,
+    ref_name: &str,
+) -> Result<Zeroizing<String>, ProxyError> {
+    let unavailable = || ProxyError::SecretUnavailable(ref_name.to_string());
+    let provider_ok = !provider.is_empty()
+        && provider.len() <= 32
+        && provider
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if !provider_ok {
+        return Err(unavailable());
+    }
+    let raw = broker
+        .resolve(&format!("oauth:{provider}"))
+        .map_err(|_| unavailable())?;
+    let grant: StoredGrant =
+        serde_json::from_str(raw.as_str()).map_err(|_| unavailable())?;
+    if let Some(exp) = grant.expires_at {
+        if exp - OAUTH_ACCESS_SKEW_SECS <= chrono::Utc::now().timestamp() {
+            return Err(unavailable());
+        }
+    }
+    Ok(Zeroizing::new(grant.access_token))
+}
 
 /// Where the master key may come from, in §14.14 order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +204,9 @@ impl VaultBroker {
         struct BrokerResolver(Arc<VaultBroker>);
         impl SecretResolver for BrokerResolver {
             fn resolve(&self, name: &str) -> Result<Zeroizing<String>, ProxyError> {
+                if let Some(provider) = name.strip_prefix(OAUTH_ACCESS_PREFIX) {
+                    return resolve_oauth_access(&self.0, provider, name);
+                }
                 self.0
                     .resolve(name)
                     .map_err(|_| ProxyError::SecretUnavailable(name.to_string()))
@@ -267,5 +319,75 @@ mod tests {
             !stdout.contains("LEAK_ATTEMPT"),
             "unscrubbed env var present"
         );
+    }
+
+    // -- oauth-access:<provider> resolution (18 §8 Google broker) ----------
+
+    fn oauth_broker() -> (tempfile::TempDir, Arc<VaultBroker>) {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = Arc::new(VaultBroker::open(
+            dir.path().join("vault.t3rnel"),
+            false,
+        ));
+        broker
+            .unlock_ordered(Some(Zeroizing::new([11u8; 32])))
+            .unwrap();
+        (dir, broker)
+    }
+
+    fn oauth_grant(expires_in_secs: Option<i64>) -> crate::plugin_auth::StoredGrant {
+        crate::plugin_auth::StoredGrant {
+            access_token: "ya29.proxy-resolved-token".into(),
+            refresh_token: Some("1//refresh".into()),
+            expires_at: expires_in_secs
+                .map(|s| (chrono::Utc::now() + chrono::Duration::seconds(s)).timestamp()),
+            scopes: vec![
+                "https://www.googleapis.com/auth/webmasters.readonly".into(),
+            ],
+            token_endpoint: Some("https://oauth2.googleapis.com/token".into()),
+            client_id: Some("cid".into()),
+        }
+    }
+
+    #[test]
+    fn oauth_access_name_resolves_the_grants_access_token() {
+        let (_d, broker) = oauth_broker();
+        let auth = crate::plugin_auth::ScopedTokenService::new(broker.clone());
+        auth.store_grant("google", oauth_grant(Some(3600))).unwrap();
+
+        let resolver = broker.as_resolver();
+        let token = resolver.resolve("oauth-access:google").unwrap();
+        assert_eq!(token.as_str(), "ya29.proxy-resolved-token");
+
+        // Unknown provider / malformed name fail closed.
+        assert!(matches!(
+            resolver.resolve("oauth-access:github"),
+            Err(ProxyError::SecretUnavailable(_))
+        ));
+        assert!(matches!(
+            resolver.resolve("oauth-access:"),
+            Err(ProxyError::SecretUnavailable(_))
+        ));
+        assert!(matches!(
+            resolver.resolve("oauth-access:Google"),
+            Err(ProxyError::SecretUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn oauth_access_fails_closed_when_grant_expired() {
+        let (_d, broker) = oauth_broker();
+        let auth = crate::plugin_auth::ScopedTokenService::new(broker.clone());
+        // Already expired, no refresh attempted at resolve time — the proxy
+        // path is sync, so freshness is checked, never repaired here.
+        auth.store_grant("google", oauth_grant(Some(-10))).unwrap();
+        let resolver = broker.as_resolver();
+        assert!(matches!(
+            resolver.resolve("oauth-access:google"),
+            Err(ProxyError::SecretUnavailable(_))
+        ));
+        // A non-expiring grant (expires_at: None) resolves.
+        auth.store_grant("google", oauth_grant(None)).unwrap();
+        assert!(resolver.resolve("oauth-access:google").is_ok());
     }
 }

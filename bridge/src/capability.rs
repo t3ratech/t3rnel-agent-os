@@ -144,6 +144,16 @@ pub const REFERENCE: &[(&str, RiskClass)] = &[
     ("fs.search", Read),
     ("git.diff", Read),
     ("git.status", Read),
+    // google.* — the Google connector plugins (search-console, analytics)
+    // sharing the core OAuth broker (docs/sections/18 §8). All are reads of
+    // Google reporting APIs except sitemap submission, which writes back to
+    // Search Console and is therefore write-reversible.
+    ("google.analytics.properties", Read),
+    ("google.analytics.report", Read),
+    ("google.searchconsole.query", Read),
+    ("google.searchconsole.sitemap.submit", WriteReversible),
+    ("google.searchconsole.sitemaps", Read),
+    ("google.searchconsole.sites", Read),
     ("media.audio.set", WriteReversible),
     ("media.metadata.read", Read),
     ("media.pause", WriteReversible),
