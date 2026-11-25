@@ -111,6 +111,12 @@ use RiskClass::{ExternalEffect, Financial, Read, System, WriteIrreversible, Writ
 /// Clicking in a browser can submit a form or send a message, so `browser.click` is `external-effect` rather than the
 /// friendlier `write-reversible`; `terminal.execute` is `system` because it runs arbitrary commands.
 pub const REFERENCE: &[(&str, RiskClass)] = &[
+    // bounty.* — the bounty-hunter connector plugin domain. Scanning public
+    // bounty boards is a read; queueing a dispatch order or tracking a
+    // receivable mutates plugin-private state but reversibly.
+    ("bounty.market.scan", Read),
+    ("bounty.order.dispatch", WriteReversible),
+    ("bounty.receivable.track", Read),
     ("browser.click", ExternalEffect),
     ("browser.download", WriteReversible),
     ("browser.fill", WriteReversible),
@@ -154,6 +160,11 @@ pub const REFERENCE: &[(&str, RiskClass)] = &[
     ("google.searchconsole.sitemap.submit", WriteReversible),
     ("google.searchconsole.sitemaps", Read),
     ("google.searchconsole.sites", Read),
+    // job.* — the job-hunter connector plugin domain. Polling agent-work
+    // marketplaces is a read; drafting an application is plugin-private and
+    // reversible (nothing is sent — delivery stays a host decision).
+    ("job.application.draft", WriteReversible),
+    ("job.market.scan", Read),
     ("media.audio.set", WriteReversible),
     ("media.metadata.read", Read),
     ("media.pause", WriteReversible),
@@ -163,6 +174,14 @@ pub const REFERENCE: &[(&str, RiskClass)] = &[
     ("media.seek", WriteReversible),
     ("media.stop", WriteReversible),
     ("media.subtitle.set", WriteReversible),
+    // social.* — the social connector plugin domain. Publishing a post is an
+    // external effect on a third-party platform; composing, scheduling and
+    // reading the queue are plugin-private and reversible.
+    ("social.account.status", Read),
+    ("social.post.draft", WriteReversible),
+    ("social.post.publish", ExternalEffect),
+    ("social.post.schedule", WriteReversible),
+    ("social.queue.read", Read),
     ("terminal.execute", System),
     ("terminal.read", Read),
     ("trade.account.read", Read),
