@@ -18,13 +18,17 @@
 //!   `data_classes` — a plugin cannot launder `personal` data into
 //!   `public`;
 //! - `approval` gates every `external-effect`/`financial` action until the
-//!   user approves;
+//!   user approves: an approval names one exact action, expires, and works once;
+//! - everything the host relies on (approvals, schedules, queued notifications,
+//!   memory labels) lives in host-only state that no plugin-facing call can write,
+//!   so a plugin cannot approve itself or relabel its own data;
 //! - nothing here exposes the substrate `usage_conn`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::plugin_storage::{PluginStorage, StorageError};
 
@@ -210,11 +214,11 @@ impl<'a> ScheduleService<'a> {
             .map_err(|e| StorageError::MigrationFailed(0, e.to_string()))?;
         // Jobs live in plugin_kv under a namespaced key — per-plugin by
         // construction, no shared table needed.
-        self.storage.kv_set(&format!("schedule:{}", job.id), &blob)
+        self.storage.state_set(&format!("schedule:{}", job.id), &blob)
     }
 
     pub fn remove(&self, id: &str) -> Result<(), StorageError> {
-        self.storage.kv_set(&format!("schedule:{}", id), "")
+        self.storage.state_set(&format!("schedule:{}", id), "")
     }
 
     /// Jobs whose `fire_at` is due, as of `now`. Caller decides whether to
@@ -224,12 +228,12 @@ impl<'a> ScheduleService<'a> {
         // approach: keep an index key listing ids.
         let idx = self
             .storage
-            .kv_get("schedule:index")
+            .state_get("schedule:index")
             .unwrap_or(None)
             .unwrap_or_default();
         let mut out = Vec::new();
         for id in idx.lines().filter(|l| !l.is_empty()) {
-            if let Some(blob) = self.storage.kv_get(&format!("schedule:{id}"))? {
+            if let Some(blob) = self.storage.state_get(&format!("schedule:{id}"))? {
                 if blob.is_empty() {
                     continue;
                 }
@@ -247,14 +251,14 @@ impl<'a> ScheduleService<'a> {
     pub fn index(&self, id: &str) -> Result<(), StorageError> {
         let idx = self
             .storage
-            .kv_get("schedule:index")
+            .state_get("schedule:index")
             .unwrap_or(None)
             .unwrap_or_default();
         if idx.lines().any(|l| l == id) {
             return Ok(());
         }
         self.storage
-            .kv_set("schedule:index", &format!("{idx}{id}\n"))
+            .state_set("schedule:index", &format!("{idx}{id}\n"))
     }
 }
 
@@ -325,8 +329,54 @@ pub struct ApprovalRequest {
     pub id: String,
     pub capability: String,
     pub risk: RiskClass,
+    /// What the user is shown. Never trusted to identify the action: that is `action_hash`.
     pub detail: String,
     pub state: ApprovalState,
+    /// SHA-256 over the capability and the exact action (its arguments), so an
+    /// approval for "send this message to Alice" cannot authorise another message
+    /// or another recipient.
+    pub action_hash: String,
+    /// Unix seconds after which the approval is void.
+    pub expires_at: i64,
+    /// Set when the approval has been spent. An approval works once.
+    #[serde(default)]
+    pub used: bool,
+}
+
+/// Longest an approval may stay valid.
+pub const MAX_APPROVAL_TTL_SECS: i64 = 24 * 3600;
+
+impl ApprovalRequest {
+    /// A pending request for exactly `action` (the canonical text or JSON of the
+    /// call's arguments). `ttl_secs` is clamped to [`MAX_APPROVAL_TTL_SECS`].
+    pub fn new(
+        id: impl Into<String>,
+        capability: &str,
+        risk: RiskClass,
+        detail: impl Into<String>,
+        action: &str,
+        ttl_secs: i64,
+    ) -> Self {
+        ApprovalRequest {
+            id: id.into(),
+            capability: capability.to_string(),
+            risk,
+            detail: detail.into(),
+            state: ApprovalState::Pending,
+            action_hash: Self::hash_action(capability, action),
+            expires_at: chrono::Utc::now().timestamp() + ttl_secs.clamp(1, MAX_APPROVAL_TTL_SECS),
+            used: false,
+        }
+    }
+
+    /// Hash of one capability call. The NUL separator keeps `("a", "bc")` and `("ab", "c")` apart.
+    pub fn hash_action(capability: &str, action: &str) -> String {
+        let mut h = Sha256::new();
+        h.update(capability.as_bytes());
+        h.update([0u8]);
+        h.update(action.as_bytes());
+        hex::encode(h.finalize())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,7 +386,7 @@ pub enum ApprovalState {
     Denied,
 }
 
-/// Approval queue persisted in the plugin DB. Risky capabilities
+/// Approval queue kept in host-only state. Risky capabilities
 /// (write-irreversible, external-effect, financial, system) MUST pass
 /// through here before execution.
 pub struct ApprovalService<'a> {
@@ -359,25 +409,38 @@ impl<'a> ApprovalService<'a> {
         Self::GATED.contains(&risk)
     }
 
+    fn key(id: &str) -> String {
+        format!("approval:{id}")
+    }
+
+    /// File a pending request. An id that already exists is refused, so a request
+    /// cannot overwrite an approved (or spent) one.
     pub fn request(&self, req: &ApprovalRequest) -> Result<(), StorageError> {
+        if self.storage.state_get(&Self::key(&req.id))?.is_some() {
+            return Err(StorageError::MigrationFailed(
+                0,
+                format!("approval {} already exists", req.id),
+            ));
+        }
+        if req.state != ApprovalState::Pending || req.used {
+            return Err(StorageError::MigrationFailed(
+                0,
+                "a new approval request must be pending and unused".into(),
+            ));
+        }
         let blob = serde_json::to_string(req)
             .map_err(|e| StorageError::MigrationFailed(0, e.to_string()))?;
-        self.storage
-            .kv_set(&format!("approval:{}", req.id), &blob)?;
-        let idx = self
-            .storage
-            .kv_get("approval:index")
-            .unwrap_or(None)
-            .unwrap_or_default();
+        self.storage.state_set(&Self::key(&req.id), &blob)?;
+        let idx = self.storage.state_get("approval:index")?.unwrap_or_default();
         if !idx.lines().any(|l| l == req.id) {
             self.storage
-                .kv_set("approval:index", &format!("{idx}{}\n", req.id))?;
+                .state_set("approval:index", &format!("{idx}{}\n", req.id))?;
         }
         Ok(())
     }
 
     pub fn get(&self, id: &str) -> Result<Option<ApprovalRequest>, StorageError> {
-        match self.storage.kv_get(&format!("approval:{id}"))? {
+        match self.storage.state_get(&Self::key(id))? {
             Some(blob) if !blob.is_empty() => serde_json::from_str(&blob)
                 .map(Some)
                 .map_err(|e| StorageError::MigrationFailed(0, e.to_string())),
@@ -385,34 +448,69 @@ impl<'a> ApprovalService<'a> {
         }
     }
 
-    /// Approve/deny mutates state and rewrites the record.
+    /// The user's decision. Only a pending request can be decided: an approval
+    /// cannot be flipped afterwards, and a spent one cannot be re-opened.
     pub fn resolve(&self, id: &str, state: ApprovalState) -> Result<(), StorageError> {
-        match self.get(id)? {
-            Some(mut req) => {
-                req.state = state;
-                self.request(&req)
-            }
-            None => Err(StorageError::NotInitialized(format!("approval {id}"))),
+        let key = Self::key(id);
+        let current = self
+            .storage
+            .state_get(&key)?
+            .ok_or_else(|| StorageError::NotInitialized(format!("approval {id}")))?;
+        let mut req: ApprovalRequest = serde_json::from_str(&current)
+            .map_err(|e| StorageError::MigrationFailed(0, e.to_string()))?;
+        if req.state != ApprovalState::Pending || state == ApprovalState::Pending {
+            return Err(StorageError::MigrationFailed(
+                0,
+                format!("approval {id} is already decided"),
+            ));
+        }
+        req.state = state;
+        let next = serde_json::to_string(&req)
+            .map_err(|e| StorageError::MigrationFailed(0, e.to_string()))?;
+        if self.storage.state_cas(&key, &current, &next)? {
+            Ok(())
+        } else {
+            Err(StorageError::MigrationFailed(0, format!("approval {id} changed while deciding")))
         }
     }
 
-    /// The gate: may `capability` at `risk` execute now? Read/write-
-    /// reversible pass; gated classes need an Approved record.
+    /// The gate: may `capability` at `risk` run `action` now? Read and
+    /// write-reversible pass. A gated call needs an approval that is approved,
+    /// unexpired, unspent, and issued for exactly this capability and action. A
+    /// successful check **spends** the approval, atomically: two callers racing
+    /// on one approval cannot both pass.
     pub fn check(
         &self,
         capability: &str,
         risk: RiskClass,
         approval_id: Option<&str>,
+        action: &str,
     ) -> Result<bool, StorageError> {
         if !Self::requires_approval(risk) {
             return Ok(true);
         }
-        match approval_id.and_then(|id| self.get(id).ok().flatten()) {
-            Some(req) if req.capability == capability && req.state == ApprovalState::Approved => {
-                Ok(true)
-            }
-            _ => Ok(false),
+        let Some(id) = approval_id else {
+            return Ok(false);
+        };
+        let key = Self::key(id);
+        let Some(current) = self.storage.state_get(&key)? else {
+            return Ok(false);
+        };
+        let Ok(mut req) = serde_json::from_str::<ApprovalRequest>(&current) else {
+            return Ok(false);
+        };
+        let valid = req.state == ApprovalState::Approved
+            && !req.used
+            && req.capability == capability
+            && req.action_hash == ApprovalRequest::hash_action(capability, action)
+            && chrono::Utc::now().timestamp() < req.expires_at;
+        if !valid {
+            return Ok(false);
         }
+        req.used = true;
+        let spent = serde_json::to_string(&req)
+            .map_err(|e| StorageError::MigrationFailed(0, e.to_string()))?;
+        self.storage.state_cas(&key, &current, &spent)
     }
 }
 
@@ -464,11 +562,11 @@ impl<'a> MemoryService<'a> {
         };
         let blob = serde_json::to_string(&entry)
             .map_err(|e| StorageError::MigrationFailed(0, e.to_string()))?;
-        self.storage.kv_set(&format!("mem:{key}"), &blob)
+        self.storage.state_set(&format!("mem:{key}"), &blob)
     }
 
     pub fn get(&self, key: &str) -> Result<Option<MemoryEntry>, StorageError> {
-        match self.storage.kv_get(&format!("mem:{key}"))? {
+        match self.storage.state_get(&format!("mem:{key}"))? {
             Some(blob) if !blob.is_empty() => serde_json::from_str(&blob)
                 .map(Some)
                 .map_err(|e| StorageError::MigrationFailed(0, e.to_string())),
@@ -607,7 +705,7 @@ impl<'a> NotifyService<'a> {
     }
     pub fn enqueue(&self, channel: &str, message_ref: &str) -> Result<(), StorageError> {
         // message_ref is an opaque reference/id — bodies stay host-side.
-        self.storage.kv_set(
+        self.storage.state_set(
             &format!("notify:{}", uuid::Uuid::new_v4()),
             &format!("channel={channel} ref={message_ref}"),
         )?;
@@ -778,60 +876,126 @@ mod tests {
         assert!(err.to_string().contains("not declared"), "{err}");
     }
 
+    fn svc_for(s: &PluginStorage) -> PluginServices<'_> {
+        PluginServices::new(s, ToolRegistry::new(std::iter::empty()), [DataClass::Public])
+    }
+
+    fn pending(id: &str, action: &str) -> ApprovalRequest {
+        ApprovalRequest::new(id, "pay.send", RiskClass::Financial, "pay 5 to alice", action, 600)
+    }
+
     #[test]
     fn approval_gates_only_high_risk_classes() {
         let (_d, s) = store();
-        let svc = PluginServices::new(
-            &s,
-            ToolRegistry::new(std::iter::empty()),
-            [DataClass::Public],
-        );
+        let svc = svc_for(&s);
         assert!(!ApprovalService::requires_approval(RiskClass::Read));
-        assert!(!ApprovalService::requires_approval(
-            RiskClass::WriteReversible
-        ));
-        assert!(ApprovalService::requires_approval(RiskClass::Financial));
-        assert!(ApprovalService::requires_approval(
-            RiskClass::ExternalEffect
-        ));
-        assert!(ApprovalService::requires_approval(RiskClass::System));
+        assert!(!ApprovalService::requires_approval(RiskClass::WriteReversible));
+        for gated in [RiskClass::Financial, RiskClass::ExternalEffect, RiskClass::System, RiskClass::WriteIrreversible] {
+            assert!(ApprovalService::requires_approval(gated), "{gated:?}");
+        }
+        assert!(svc.approval.check("fs.read", RiskClass::Read, None, "").unwrap());
+        assert!(!svc.approval.check("pay.send", RiskClass::Financial, None, "x").unwrap());
+        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("nope"), "x").unwrap());
+    }
 
-        // Ungated read passes without approval.
-        assert!(svc
-            .approval
-            .check("fs.read", RiskClass::Read, None)
-            .unwrap());
-        // Gated financial needs an approved record.
-        assert!(!svc
-            .approval
-            .check("pay.send", RiskClass::Financial, None)
-            .unwrap());
-        svc.approval
-            .request(&ApprovalRequest {
-                id: "ap1".into(),
-                capability: "pay.send".into(),
-                risk: RiskClass::Financial,
-                detail: "test".into(),
-                state: ApprovalState::Pending,
-            })
-            .unwrap();
+    #[test]
+    fn an_approval_names_one_exact_action_and_works_once() {
+        let (_d, s) = store();
+        let svc = svc_for(&s);
+        svc.approval.request(&pending("ap1", "to=alice;amount=5")).unwrap();
         // Pending is not enough.
-        assert!(!svc
-            .approval
-            .check("pay.send", RiskClass::Financial, Some("ap1"))
-            .unwrap());
-        svc.approval
-            .resolve("ap1", ApprovalState::Approved)
-            .unwrap();
-        assert!(svc
-            .approval
-            .check("pay.send", RiskClass::Financial, Some("ap1"))
-            .unwrap());
-        // Approval for a different capability doesn't transfer.
-        assert!(!svc
-            .approval
-            .check("pay.other", RiskClass::Financial, Some("ap1"))
-            .unwrap());
+        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("ap1"), "to=alice;amount=5").unwrap());
+        svc.approval.resolve("ap1", ApprovalState::Approved).unwrap();
+        // The approval covers the action the user was shown and nothing else.
+        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("ap1"), "to=mallory;amount=5").unwrap(), "another recipient");
+        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("ap1"), "to=alice;amount=5000").unwrap(), "another amount");
+        assert!(!svc.approval.check("pay.other", RiskClass::Financial, Some("ap1"), "to=alice;amount=5").unwrap(), "another capability");
+        // The right action passes - once.
+        assert!(svc.approval.check("pay.send", RiskClass::Financial, Some("ap1"), "to=alice;amount=5").unwrap());
+        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("ap1"), "to=alice;amount=5").unwrap(), "an approval is spent by use");
+        assert!(svc.approval.get("ap1").unwrap().unwrap().used);
+    }
+
+    #[test]
+    fn an_expired_approval_is_void() {
+        let (_d, s) = store();
+        let svc = svc_for(&s);
+        let mut req = pending("old", "a");
+        req.expires_at = chrono::Utc::now().timestamp() - 1;
+        svc.approval.request(&req).unwrap();
+        svc.approval.resolve("old", ApprovalState::Approved).unwrap();
+        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("old"), "a").unwrap());
+        // And no request may ask for more than a day.
+        let long = ApprovalRequest::new("long", "pay.send", RiskClass::Financial, "d", "a", 10 * 365 * 24 * 3600);
+        assert!(long.expires_at <= chrono::Utc::now().timestamp() + MAX_APPROVAL_TTL_SECS + 1);
+    }
+
+    #[test]
+    fn a_decision_cannot_be_flipped_and_a_request_cannot_overwrite_an_approval() {
+        let (_d, s) = store();
+        let svc = svc_for(&s);
+        svc.approval.request(&pending("d1", "a")).unwrap();
+        svc.approval.resolve("d1", ApprovalState::Denied).unwrap();
+        assert!(svc.approval.resolve("d1", ApprovalState::Approved).is_err(), "a denial is final");
+        assert!(svc.approval.resolve("missing", ApprovalState::Approved).is_err());
+        // Re-filing the same id (to replace a denied request with a fresh pending one) is refused.
+        assert!(svc.approval.request(&pending("d1", "a")).is_err());
+        // A request cannot arrive already approved or already spent.
+        let mut pre = pending("d2", "a");
+        pre.state = ApprovalState::Approved;
+        assert!(svc.approval.request(&pre).is_err());
+        let mut spent = pending("d3", "a");
+        spent.used = true;
+        assert!(svc.approval.request(&spent).is_err());
+    }
+
+    #[test]
+    fn two_racing_callers_cannot_both_spend_one_approval() {
+        let home = tempfile::tempdir().unwrap();
+        let a = PluginStorage::open(home.path(), "org.test.race").unwrap();
+        let b = PluginStorage::open(home.path(), "org.test.race").unwrap();
+        let sa = svc_for(&a);
+        sa.approval.request(&pending("r1", "x")).unwrap();
+        sa.approval.resolve("r1", ApprovalState::Approved).unwrap();
+        let sb = svc_for(&b);
+        let first = sa.approval.check("pay.send", RiskClass::Financial, Some("r1"), "x").unwrap();
+        let second = sb.approval.check("pay.send", RiskClass::Financial, Some("r1"), "x").unwrap();
+        assert_eq!([first, second].iter().filter(|ok| **ok).count(), 1, "exactly one winner");
+    }
+
+    #[test]
+    fn a_plugin_writing_its_own_key_value_store_cannot_forge_host_state() {
+        let (_d, s) = store();
+        let svc = svc_for(&s);
+        svc.approval.request(&pending("f1", "to=alice")).unwrap();
+        // The plugin-facing store is the only thing a plugin can write. Forge every host key.
+        let forged = serde_json::to_string(&ApprovalRequest {
+            state: ApprovalState::Approved,
+            ..pending("f1", "to=alice")
+        })
+        .unwrap();
+        s.kv_set("approval:f1", &forged).unwrap();
+        s.kv_set("approval:index", "f1\n").unwrap();
+        s.kv_set("crashlog", "[]").unwrap();
+        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("f1"), "to=alice").unwrap(), "self-approval must fail");
+        assert_eq!(svc.approval.get("f1").unwrap().unwrap().state, ApprovalState::Pending);
+    }
+
+    #[test]
+    fn memory_labels_cannot_be_rewritten_through_the_plugin_kv() {
+        let (_d, s) = store();
+        let mem = MemoryService::new(&s, [DataClass::Public, DataClass::Personal]);
+        mem.set("note", "tainted text", &[DataClass::Personal].into_iter().collect()).unwrap();
+        // A plugin overwrites the record with the same key and empty labels, trying to launder it.
+        let laundered = serde_json::to_string(&MemoryEntry {
+            key: "note".into(),
+            value: "tainted text".into(),
+            taint: BTreeSet::new(),
+            updated_at: "now".into(),
+        })
+        .unwrap();
+        s.kv_set("mem:note", &laundered).unwrap();
+        assert!(mem.get("note").unwrap().unwrap().taint.contains(&DataClass::Personal));
     }
 
     #[test]

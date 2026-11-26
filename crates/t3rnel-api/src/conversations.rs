@@ -657,7 +657,7 @@ pub fn build_conversation_stack(
     // Unlock is best-effort: the local adapter needs no secrets, and locked
     // credentialed adapters simply fail their connect until unlocked.
     let vault = Arc::new(VaultBroker::open(
-        home.join("vault.t3rnel"),
+        home.join(t3rnel_extensions::vault::VAULT_FILE_NAME),
         kernel.config.plugin_dev_mode,
     ));
     let _ = vault.unlock_ordered(None);
@@ -899,7 +899,7 @@ mod tests {
                 linked_at: chrono::Utc::now(),
             })
             .unwrap();
-        let vault = Arc::new(VaultBroker::open(home.path().join("vault.t3rnel"), false));
+        let vault = Arc::new(VaultBroker::open(home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME), false));
         vault
             .unlock_ordered(Some(Zeroizing::new([4u8; 32])))
             .unwrap();
@@ -945,7 +945,7 @@ mod tests {
             // Connect the local adapter through the registry (vault attached).
             let creds = t3rnel_runtime::channels::BrokeredCreds::new(
                 Arc::new({
-                    let v = VaultBroker::open(self._home.path().join("vault.t3rnel"), false);
+                    let v = VaultBroker::open(self._home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME), false);
                     v.unlock_ordered(Some(Zeroizing::new([4u8; 32]))).unwrap();
                     v
                 }),

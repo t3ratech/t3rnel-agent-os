@@ -18,6 +18,11 @@ use std::path::PathBuf;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
+/// File name of the credential vault inside the T3rnel home. The kernel, the
+/// plugin host and the conversation service must all open this one file; two
+/// names would mean two vaults, and a plugin would never see a key the user pasted.
+pub const VAULT_FILE_NAME: &str = "vault.enc";
+
 /// Service name for OS keyring storage.
 #[cfg(not(test))]
 const KEYRING_SERVICE: &str = "t3rnel-vault";

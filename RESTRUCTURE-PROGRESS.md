@@ -17,7 +17,7 @@ State as of this session. The authoritative spec is
   and `protoc` missing → `NEEDS-FROM-TOOLS.md` at repo root.
 - **R2 §9.2 bridge**: `manifest.rs` gained `plugin.type` (PluginType),
   `min_t3rnel_version`, `targets`, `config_schema`, `permissions.auth`
-  (AuthRule+AuthScheme: bearer/header/basic/query-key/hmac-sha256/aws-sigv4),
+  (AuthRule+AuthScheme: bearer/header/basic/query-key/hmac-sha256),
   `permissions.data_classes` (closed DataClass enum per 05 §14.10),
   `permissions.local` (LocalBroker: dbus/local-http/cli/a11y, per-kind field
   validation), top-level `requires` (HOST_SERVICES keys + version reqs).
@@ -59,7 +59,7 @@ State as of this session. The authoritative spec is
   resolves DNS via tokio and refuses if ANY answer is private. Never follows
   redirects (returns them + `blocked_redirects`). Secrets resolved through
   `SecretResolver` trait (Zeroizing), applied via 6 schemes
-  (bearer/header/basic/query-key/hmac-sha256/aws-sigv4 — real HMAC chains),
+  (bearer/header/basic/query-key/hmac-sha256 — real HMAC chains),
   response body scanned and echoed secrets replaced with `secret:NAME`.
   19 tests pass incl. live fake-upstream e2e (injected auth verified on the
   wire, secret echo redacted) and redirect non-follow. Clippy clean,

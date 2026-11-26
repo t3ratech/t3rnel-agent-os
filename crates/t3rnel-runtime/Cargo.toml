@@ -6,6 +6,7 @@ license.workspace = true
 description = "Agent runtime and execution environment for T3rnel"
 
 [dependencies]
+t3rnel-egress = { path = "../../sdk/rust/t3rnel-egress" }
 t3rnel-types = { path = "../t3rnel-types" }
 t3rnel-bridge = { path = "../../bridge" }
 t3rnel-memory = { path = "../t3rnel-memory" }

@@ -84,12 +84,7 @@ impl ReleaseSigner {
         let mut seed = [0u8; 32];
         use rand::RngCore;
         rand::thread_rng().fill_bytes(&mut seed);
-        fs::write(&key_path, seed)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
-        }
+        crate::plugin_lifecycle::write_private_new(&key_path, &seed)?;
         let sk = SigningKey::from_bytes(&seed);
         fs::write(&pub_path, hex::encode(sk.verifying_key().to_bytes()))?;
         Ok(ReleaseSigner { sk })
@@ -114,6 +109,9 @@ impl ReleaseSigner {
     /// Write `signature.bin` + `signer.pub` into an already-built package
     /// directory, signing the exact `manifest.json` bytes on disk.
     pub fn sign_package_dir(&self, pkg: &Path) -> Result<(), SignError> {
+        // The signature must cover the binary: put every payload file's hash into
+        // the manifest first, then sign the manifest.
+        crate::plugin_lifecycle::seal_package_files(pkg)?;
         let manifest_bytes = fs::read(pkg.join("manifest.json"))
             .map_err(|_| SignError::Manifest("manifest.json missing".into()))?;
         let sig = self.sk.sign(&manifest_bytes);
@@ -319,7 +317,6 @@ fn lite_from_v1(m: &t3rnel_bridge::manifest::Manifest) -> PluginManifestLite {
             t3rnel_bridge::manifest::AuthScheme::Basic => "basic",
             t3rnel_bridge::manifest::AuthScheme::QueryKey => "query-key",
             t3rnel_bridge::manifest::AuthScheme::HmacSha256 => "hmac-sha256",
-            t3rnel_bridge::manifest::AuthScheme::AwsSigV4 => "aws-sigv4",
         };
         lines.push(format!(
             "auth: {} via {} → {}",
@@ -372,6 +369,7 @@ fn lite_from_v1(m: &t3rnel_bridge::manifest::Manifest) -> PluginManifestLite {
         migrations: Vec::new(),
         permissions_summary: lines,
         entitlement_account: None,
+        files: Default::default(),
     }
 }
 
@@ -404,7 +402,14 @@ fn copy_payload(src: &Path, dst: &Path) -> Result<(), SignError> {
         let to = dst.join(&name);
         if ty.is_dir() {
             copy_dir_filtered(&entry.path(), &to)?;
-        } else if ty.is_file() || ty.is_symlink() {
+        } else if ty.is_symlink() {
+            // A symlink would copy whatever it points at (a key, a token file)
+            // into a package that is then signed and published.
+            return Err(SignError::Manifest(format!(
+                "plugin source contains a symlink: {}",
+                entry.path().display()
+            )));
+        } else if ty.is_file() {
             fs::copy(entry.path(), &to)?;
         }
     }
@@ -423,7 +428,14 @@ fn copy_dir_filtered(src: &Path, dst: &Path) -> Result<(), SignError> {
         let to = dst.join(&name);
         if ty.is_dir() {
             copy_dir_filtered(&entry.path(), &to)?;
-        } else if ty.is_file() || ty.is_symlink() {
+        } else if ty.is_symlink() {
+            // A symlink would copy whatever it points at (a key, a token file)
+            // into a package that is then signed and published.
+            return Err(SignError::Manifest(format!(
+                "plugin source contains a symlink: {}",
+                entry.path().display()
+            )));
+        } else if ty.is_file() {
             fs::copy(entry.path(), &to)?;
         }
     }
@@ -451,6 +463,7 @@ pub fn build_package(src: &Path, dst: &Path) -> Result<PluginManifestLite, SignE
             migrations: Vec::new(),
             permissions_summary: permissions_summary(src_manifest),
             entitlement_account: None,
+            files: Default::default(),
         },
         // `Manifest::parse` already ran full v1 validation (capabilities,
         // auth scoping, data classes, requires, security flags).

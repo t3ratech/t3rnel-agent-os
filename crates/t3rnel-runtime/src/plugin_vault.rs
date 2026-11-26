@@ -5,8 +5,9 @@
 //! hands the value to the proxy/scheme layer in `Zeroizing` memory only, and
 //! audits the *reference*, never the value.
 //!
-//! Unlock order (§14.14): an explicit host-provided master key first, then —
-//! only when the host explicitly enables dev mode — `T3RNEL_VAULT_KEY`.
+//! Unlock order (§14.14): an explicit host-provided master key first, then the
+//! OS keyring, then — only when the host explicitly enables dev mode —
+//! `T3RNEL_VAULT_KEY`.
 //! Interactive unlock is a host concern and is reported, not performed here.
 //! The env-var path is dev-only: production builds refuse it unless the host
 //! passes `dev_mode = true`, so a stray environment cannot silently unlock
@@ -74,6 +75,8 @@ fn resolve_oauth_access(
 pub enum UnlockSource {
     /// Host supplied the key at boot (key file descriptor / secret service).
     HostProvided,
+    /// The OS keyring — the same master key the kernel unlocks its vault with.
+    Keyring,
     /// `T3RNEL_VAULT_KEY` — dev/CI only, requires `dev_mode`.
     EnvDevKey,
     /// Interactive prompt — host UI concern; broker reports it needed.
@@ -141,7 +144,13 @@ impl VaultBroker {
             }
             return Ok(UnlockSource::HostProvided);
         }
-        // 2. Dev-only env key.
+        // 2. The OS keyring: where the master key lives in normal use. Skipped when
+        //    T3RNEL_VAULT_KEY is set, because the vault would then read that variable
+        //    instead, and the variable is development-only (handled below).
+        if vault.exists() && std::env::var_os("T3RNEL_VAULT_KEY").is_none() && vault.unlock().is_ok() {
+            return Ok(UnlockSource::Keyring);
+        }
+        // 3. Dev-only env key.
         if self.dev_mode {
             if let Ok(env) = std::env::var("T3RNEL_VAULT_KEY") {
                 if !env.is_empty() {
@@ -222,7 +231,7 @@ mod tests {
 
     fn scratch_vault() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vault.t3rnel");
+        let path = dir.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME);
         (dir, path)
     }
 
@@ -326,7 +335,7 @@ mod tests {
     fn oauth_broker() -> (tempfile::TempDir, Arc<VaultBroker>) {
         let dir = tempfile::tempdir().unwrap();
         let broker = Arc::new(VaultBroker::open(
-            dir.path().join("vault.t3rnel"),
+            dir.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME),
             false,
         ));
         broker
@@ -346,13 +355,14 @@ mod tests {
             ],
             token_endpoint: Some("https://oauth2.googleapis.com/token".into()),
             client_id: Some("cid".into()),
+            client_secret: None,
         }
     }
 
     #[test]
     fn oauth_access_name_resolves_the_grants_access_token() {
         let (_d, broker) = oauth_broker();
-        let auth = crate::plugin_auth::ScopedTokenService::new(broker.clone());
+        let auth = crate::plugin_auth::ScopedTokenService::new(broker.clone(), "org.test.vault");
         auth.store_grant("google", oauth_grant(Some(3600))).unwrap();
 
         let resolver = broker.as_resolver();
@@ -377,7 +387,7 @@ mod tests {
     #[test]
     fn oauth_access_fails_closed_when_grant_expired() {
         let (_d, broker) = oauth_broker();
-        let auth = crate::plugin_auth::ScopedTokenService::new(broker.clone());
+        let auth = crate::plugin_auth::ScopedTokenService::new(broker.clone(), "org.test.vault");
         // Already expired, no refresh attempted at resolve time — the proxy
         // path is sync, so freshness is checked, never repaired here.
         auth.store_grant("google", oauth_grant(Some(-10))).unwrap();
@@ -389,5 +399,46 @@ mod tests {
         // A non-expiring grant (expires_at: None) resolves.
         auth.store_grant("google", oauth_grant(None)).unwrap();
         assert!(resolver.resolve("oauth-access:google").is_ok());
+    }
+
+    // ---- one vault, shared with the kernel ----------------------------------------------------------
+    #[test]
+    fn the_plugin_host_opens_the_kernels_vault_file() {
+        use crate::plugin_host::{PluginHost, PluginHostConfig};
+        let home = tempfile::tempdir().unwrap();
+        let key = [5u8; 32];
+        // The user pastes a key into the key screen: the kernel's vault file gets the entry.
+        {
+            let mut kernel_vault = t3rnel_extensions::vault::CredentialVault::new(
+                home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME),
+            );
+            kernel_vault.init_with_key(Zeroizing::new(key)).unwrap();
+            kernel_vault
+                .set("exchange-key".into(), Zeroizing::new("pasted-by-the-user".into()))
+                .unwrap();
+        }
+        let host = PluginHost::open(
+            home.path(),
+            PluginHostConfig {
+                plugin_id: "org.test.sharedvault".into(),
+                egress: vec![],
+                auth: vec![],
+                vault_key: Some(Zeroizing::new(key)),
+                dev_mode: false,
+            },
+        )
+        .unwrap();
+        // With the old file name this opened a second, empty vault and found nothing.
+        assert_eq!(host.vault.resolve("exchange-key").unwrap().as_str(), "pasted-by-the-user");
+        assert!(!home.path().join("vault.t3rnel").exists(), "no second vault file may be created");
+    }
+
+    #[test]
+    fn without_any_key_the_broker_stays_locked_and_does_not_create_a_vault() {
+        let (_d, path) = scratch_vault();
+        std::env::remove_var("T3RNEL_VAULT_KEY");
+        let broker = VaultBroker::open(path.clone(), false);
+        assert!(matches!(broker.unlock_ordered(None), Err(BrokerError::Locked)));
+        assert!(!path.exists());
     }
 }

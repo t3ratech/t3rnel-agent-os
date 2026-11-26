@@ -1274,7 +1274,7 @@ impl T3rnelKernel {
 
         // Initialize credential resolver (vault → dotenv → env var)
         let credential_resolver = {
-            let vault_path = config.home_dir.join("vault.enc");
+            let vault_path = config.home_dir.join(t3rnel_extensions::vault::VAULT_FILE_NAME);
             let vault = if vault_path.exists() {
                 let mut v = t3rnel_extensions::vault::CredentialVault::new(vault_path);
                 match v.unlock() {

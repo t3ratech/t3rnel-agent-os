@@ -52,6 +52,7 @@ impl PluginStatus {
 pub fn status_for_proxy_error(e: &ProxyError) -> PluginStatus {
     match e {
         ProxyError::BadUrl
+        | ProxyError::RequestTooLarge(_)
         | ProxyError::BadPathEncoding
         | ProxyError::BadFraming
         | ProxyError::MethodNotDeclared(_, _)
@@ -61,6 +62,7 @@ pub fn status_for_proxy_error(e: &ProxyError) -> PluginStatus {
         | ProxyError::PrivateUpstream(_)
         | ProxyError::SecretUnavailable(_)
         | ProxyError::RedirectBlocked(_) => PluginStatus::PermissionDenied,
+        ProxyError::ResponseTooLarge(_) => PluginStatus::ResourceExhausted,
         ProxyError::Upstream(_) => PluginStatus::Unavailable,
     }
 }
@@ -71,6 +73,9 @@ pub struct PluginHost {
     pub storage: PluginStorage,
     pub proxy: PluginProxy,
     pub vault: Arc<VaultBroker>,
+    /// One service per host, so the key that authenticates token references
+    /// outlives a single call.
+    auth: crate::plugin_auth::ScopedTokenService,
 }
 
 /// Everything needed to construct a [`PluginHost`] — supplied by the
@@ -95,16 +100,18 @@ impl PluginHost {
     ) -> Result<Self, crate::plugin_vault::BrokerError> {
         let storage = PluginStorage::open(home, &cfg.plugin_id)
             .map_err(|e| crate::plugin_vault::BrokerError::Vault(e.to_string()))?;
-        let vault_path = home.join("vault.t3rnel");
+        let vault_path = home.join(t3rnel_extensions::vault::VAULT_FILE_NAME);
         let vault = Arc::new(VaultBroker::open(vault_path, cfg.dev_mode));
         vault.unlock_ordered(cfg.vault_key)?;
         let resolver = vault.as_resolver();
         let proxy = PluginProxy::new(cfg.plugin_id.clone(), cfg.egress, cfg.auth, resolver);
+        let auth = crate::plugin_auth::ScopedTokenService::new(vault.clone(), cfg.plugin_id.clone());
         Ok(PluginHost {
             plugin_id: cfg.plugin_id,
             storage,
             proxy,
             vault,
+            auth,
         })
     }
 
@@ -142,8 +149,8 @@ impl PluginHost {
     /// [`crate::plugin_auth::ScopedTokenService::resolve`] stays host-side.
     /// Vault-scoped to this plugin host's broker — grants live under
     /// `oauth:<provider>` and are shared with the core consent flow.
-    pub fn auth(&self) -> crate::plugin_auth::ScopedTokenService {
-        crate::plugin_auth::ScopedTokenService::new(self.vault.clone())
+    pub fn auth(&self) -> &crate::plugin_auth::ScopedTokenService {
+        &self.auth
     }
 
     /// `storage` host service KV surface.
@@ -176,6 +183,7 @@ mod tests {
                 methods: vec!["GET".into()],
                 paths: vec!["/v1/*".into()],
                 allow_private: true,
+                allow_encoded_slash: false,
             }],
             auth: vec![],
             vault_key: Some(zeroize::Zeroizing::new([5u8; 32])),

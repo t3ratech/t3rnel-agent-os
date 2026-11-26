@@ -52,6 +52,7 @@ pub fn reapproval_needed(approved: &Manifest, updated: &Manifest) -> Vec<Reappro
                     .map(|s| format!("filesystem.write:{s}")),
             )
             .chain(p.secrets.required.iter().map(|s| format!("secret:{s}")))
+            .chain(p.network.encoded_slash.iter().map(|h| format!("network.encoded_slash:{h}")))
             .collect()
     };
     let before = permissions(approved);
@@ -131,7 +132,6 @@ fn scheme_name(scheme: AuthScheme) -> &'static str {
         AuthScheme::Basic => "basic",
         AuthScheme::QueryKey => "query-key",
         AuthScheme::HmacSha256 => "hmac-sha256",
-        AuthScheme::AwsSigV4 => "aws-sigv4",
     }
 }
 
@@ -405,5 +405,21 @@ mod tests {
         assert!(reapproval_needed(&approved2, &updated3)
             .iter()
             .any(|r| matches!(r, Reapproval::NewLocalBroker(_))));
+    }
+
+    #[test]
+    fn turning_on_encoded_slashes_for_a_host_needs_fresh_approval() {
+        // Anchor on the network block: the auth rule repeats the same `hosts:`
+        // value at a deeper indent, and a bare `hosts:` pattern matches inside it.
+        let yaml = VLC.replace(
+            "    default: deny\n    hosts: [\"127.0.0.1:8080\"]\n",
+            "    default: deny\n    hosts: [\"127.0.0.1:8080\"]\n    encoded_slash: [\"127.0.0.1:8080\"]\n",
+        );
+        let updated = Manifest::parse(&yaml).unwrap();
+        assert!(reapproval_needed(&base(), &updated)
+            .iter()
+            .any(|r| matches!(r, Reapproval::NewPermission(p) if p == "network.encoded_slash:127.0.0.1:8080")));
+        // Turning it off again is removing authority: no approval.
+        assert!(reapproval_needed(&updated, &base()).is_empty());
     }
 }

@@ -149,8 +149,11 @@ impl PluginStorage {
         Ok(ran)
     }
 
-    /// Generic KV get/set — the shape most plugin state needs. Namespaced
-    /// keys keep plugins from colliding with host bookkeeping tables.
+    /// The **plugin-facing** key-value store (the `storage` host service). A
+    /// plugin may read and write any key here and nothing the host relies on
+    /// is kept here: crash counts, approvals, schedules, queued notifications
+    /// and memory labels live in the host-only table behind
+    /// [`state_get`](Self::state_get), which no plugin-facing call reaches.
     pub fn kv_get(&self, key: &str) -> Result<Option<String>, StorageError> {
         self.ensure_kv_table()?;
         let mut stmt = self
@@ -169,6 +172,54 @@ impl PluginStorage {
             "INSERT INTO plugin_kv (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Host-only state. Same shape as the plugin KV but a separate table, and
+    /// nothing exposed to a plugin reads or writes it — so a plugin cannot reset
+    /// its own crash log, approve its own request, or relabel its own memory.
+    pub fn state_get(&self, key: &str) -> Result<Option<String>, StorageError> {
+        self.ensure_state_table()?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM host_state WHERE key = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![key])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get::<_, String>(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn state_set(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.ensure_state_table()?;
+        self.conn.execute(
+            "INSERT INTO host_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Compare-and-set: write `new` only if the current value is exactly
+    /// `expected`. Returns whether it wrote. This is how a single-use approval is
+    /// consumed: two racing callers cannot both succeed.
+    pub fn state_cas(&self, key: &str, expected: &str, new: &str) -> Result<bool, StorageError> {
+        self.ensure_state_table()?;
+        let changed = self.conn.execute(
+            "UPDATE host_state SET value = ?3 WHERE key = ?1 AND value = ?2",
+            rusqlite::params![key, expected, new],
+        )?;
+        Ok(changed == 1)
+    }
+
+    fn ensure_state_table(&self) -> Result<(), StorageError> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS host_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
+            [],
         )?;
         Ok(())
     }
@@ -282,5 +333,27 @@ mod tests {
         assert_eq!(tail.len(), 2);
         assert_eq!(tail[0].1, "call"); // newest first
         assert_eq!(tail[1].1, "install");
+    }
+
+    #[test]
+    fn host_state_is_a_separate_table_from_the_plugin_facing_kv() {
+        let home = tempfile::tempdir().unwrap();
+        let s = PluginStorage::open(home.path(), "org.test.state").unwrap();
+        s.kv_set("crashlog", "plugin wrote this").unwrap();
+        assert_eq!(s.state_get("crashlog").unwrap(), None, "a plugin write must not reach host state");
+        s.state_set("crashlog", "[1,2,3]").unwrap();
+        assert_eq!(s.kv_get("crashlog").unwrap().as_deref(), Some("plugin wrote this"), "a host write must not reach the plugin kv");
+        assert_eq!(s.state_get("crashlog").unwrap().as_deref(), Some("[1,2,3]"));
+    }
+
+    #[test]
+    fn compare_and_set_lets_exactly_one_writer_win() {
+        let home = tempfile::tempdir().unwrap();
+        let s = PluginStorage::open(home.path(), "org.test.cas").unwrap();
+        s.state_set("k", "a").unwrap();
+        assert!(s.state_cas("k", "a", "b").unwrap());
+        assert!(!s.state_cas("k", "a", "c").unwrap(), "the second writer saw a stale value");
+        assert_eq!(s.state_get("k").unwrap().as_deref(), Some("b"));
+        assert!(!s.state_cas("missing", "a", "b").unwrap());
     }
 }

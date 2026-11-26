@@ -208,8 +208,6 @@ pub enum AuthScheme {
     Basic,
     QueryKey,
     HmacSha256,
-    #[serde(rename = "aws-sigv4")]
-    AwsSigV4,
 }
 
 /// Data classification of content (05 §14.10). Declaration order is
@@ -295,6 +293,12 @@ pub struct Network {
     pub default: NetworkDefault,
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// Hosts (a subset of `hosts`) whose paths may carry percent-encoded slashes inside
+    /// a segment. Empty by default. Declared per host because it is only ever right for
+    /// an API that documents it (for example Google Search Console's site and sitemap
+    /// URLs); widening it is a new permission and needs fresh approval.
+    #[serde(default)]
+    pub encoded_slash: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -525,6 +529,11 @@ impl Manifest {
         }
         for host in &self.permissions.network.hosts {
             if !valid_host(host) {
+                out.push(Violation::BadHost(host.clone()));
+            }
+        }
+        for host in &self.permissions.network.encoded_slash {
+            if !self.permissions.network.hosts.contains(host) {
                 out.push(Violation::BadHost(host.clone()));
             }
         }
@@ -886,6 +895,23 @@ mod tests {
     }
 
     #[test]
+    fn encoded_slash_is_empty_by_default_and_only_for_declared_hosts() {
+        let m = Manifest::parse(VLC).unwrap();
+        assert!(m.permissions.network.encoded_slash.is_empty());
+        // Anchor on the network block: the auth rule below repeats the same
+        // `hosts:` value at a deeper indent, and a bare `hosts:` pattern would
+        // match inside it too.
+        let ok = VLC.replace(
+            "    default: deny\n    hosts: [\"127.0.0.1:8080\"]\n",
+            "    default: deny\n    hosts: [\"127.0.0.1:8080\"]\n    encoded_slash: [\"127.0.0.1:8080\"]\n",
+        );
+        assert_eq!(Manifest::parse(&ok).unwrap().permissions.network.encoded_slash, vec!["127.0.0.1:8080".to_string()]);
+        // A host that is not declared in `hosts` cannot be given the option.
+        let bad = ok.replace("encoded_slash: [\"127.0.0.1:8080\"]", "encoded_slash: [\"other.example\"]");
+        assert_eq!(violations_of(&bad), vec![Violation::BadHost("other.example".into())]);
+    }
+
+    #[test]
     fn an_unknown_capability_is_refused() {
         let yaml = VLC.replace("  - id: media.seek", "  - id: media.teleport");
         assert_eq!(
@@ -1198,7 +1224,6 @@ mod tests {
             ("basic", AuthScheme::Basic),
             ("query-key", AuthScheme::QueryKey),
             ("hmac-sha256", AuthScheme::HmacSha256),
-            ("aws-sigv4", AuthScheme::AwsSigV4),
         ] {
             let yaml = VLC.replace("scheme: \"basic\"", &format!("scheme: \"{yaml_scheme}\""));
             assert_eq!(

@@ -124,6 +124,13 @@ pub const REFERENCE: &[(&str, RiskClass)] = &[
     ("browser.read", Read),
     ("browser.screenshot", Read),
     ("browser.tabs.list", Read),
+    // business.* — the business-ideas connector plugin domain
+    // (docs/sections/18 §8). Scoring/ranking idea records is a read;
+    // registering scout signals and moving the validation pipeline are
+    // plugin-private and reversible.
+    ("business.idea.generate", WriteReversible),
+    ("business.idea.score", Read),
+    ("business.idea.validate", WriteReversible),
     // comms.* — the 2-way messaging plugin domain
     // (docs/sections/18 §8 step 3). Sending anything over a channel is an
     // external effect; reading thread state is a read.
@@ -174,6 +181,21 @@ pub const REFERENCE: &[(&str, RiskClass)] = &[
     ("media.seek", WriteReversible),
     ("media.stop", WriteReversible),
     ("media.subtitle.set", WriteReversible),
+    // nft.* — the nft connector plugin domain. Marketplace reads and the
+    // sales monitor are reads; pinning metadata to IPFS and preparing an
+    // unsigned Seaport listing plan are plugin-private and reversible
+    // (nothing is signed or published by the plugin).
+    ("nft.collection.research", Read),
+    ("nft.listing.prepare", WriteReversible),
+    ("nft.sale.monitor", Read),
+    ("nft.storage.publish", WriteReversible),
+    // research.* — the market-research connector plugin domain. Trend
+    // scans are reads of public sources; recording observations and
+    // promoting them into the build-order registry are plugin-private
+    // and reversible.
+    ("research.observation.record", WriteReversible),
+    ("research.opportunity.promote", WriteReversible),
+    ("research.trend.scan", Read),
     // social.* — the social connector plugin domain. Publishing a post is an
     // external effect on a third-party platform; composing, scheduling and
     // reading the queue are plugin-private and reversible.

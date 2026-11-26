@@ -20,7 +20,7 @@
 //! approval — approval replies are the ONLY text this service acts on, and
 //! they still pass policy re-validation.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -398,6 +398,10 @@ pub struct ConversationService {
     /// Outbound notify rate limit: (channel,account) → recent send instants.
     notify_rate: Mutex<BTreeMap<(String, String), VecDeque<Instant>>>,
     deferred: Mutex<Vec<DeferredNotification>>,
+    /// Bindings being decided right now. A decision awaits the approval backend, so
+    /// without this two near-simultaneous replies could both pass the "still pending"
+    /// check and both be applied.
+    deciding: Mutex<HashSet<String>>,
 }
 
 /// Inbound events allowed per sender per minute before dropping.
@@ -461,6 +465,7 @@ impl ConversationService {
             inbound_rate: Mutex::new(BTreeMap::new()),
             notify_rate: Mutex::new(BTreeMap::new()),
             deferred: Mutex::new(deferred),
+            deciding: Mutex::new(HashSet::new()),
         })
     }
 
@@ -688,23 +693,25 @@ impl ConversationService {
     /// Parse an approval reply out of message text. Returns the verdict and
     /// an optional explicit binding id ("YES AB-000003", "NO P-12").
     pub fn parse_reply(text: &str) -> Option<(ApprovalVerdict, Option<String>)> {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        let upper = trimmed.to_ascii_uppercase();
+        let upper = text.trim().to_ascii_uppercase();
         let mut parts = upper.split_whitespace();
         let first = parts.next()?;
-        let rest = parts.next().map(|s| s.to_string());
-        let verdict = match first {
-            "YES" | "Y" | "APPROVE" | "APPROVED" | "OK" | "CONFIRM" => ApprovalVerdict::Approve,
+        let rest = parts.next().map(|s| s.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-').to_string());
+        // A reply is the verdict word, optionally followed by one approval id: nothing else.
+        // "yes but only if..." or "ok thanks" is conversation, not consent; and a bare
+        // "ok" is far too common a word to authorise a payment.
+        if parts.next().is_some() {
+            return None;
+        }
+        let verdict = match first.trim_matches(|c: char| !c.is_ascii_alphanumeric()) {
+            "YES" | "Y" | "APPROVE" | "APPROVED" | "CONFIRM" => ApprovalVerdict::Approve,
             "NO" | "N" | "DENY" | "DENIED" | "REJECT" | "REJECTED" | "DECLINE" => {
                 ApprovalVerdict::Deny
             }
             "DEFER" | "LATER" | "SNOOZE" | "REMIND" => ApprovalVerdict::Defer,
             _ => return None,
         };
-        Some((verdict, rest))
+        Some((verdict, rest.filter(|r| !r.is_empty())))
     }
 
     /// Route one inbound event. This is THE entry point every adapter feeds.
@@ -790,7 +797,8 @@ impl ConversationService {
             .and_then(|t| t.bound_approval.clone())
         {
             if let Some(b) = bindings.get(&bound) {
-                if b.is_live(now) {
+                // The thread can be a group: only the person the ask was sent to may answer it.
+                if b.is_live(now) && b.sender == event.sender {
                     return Some(b.id.clone());
                 }
             }
@@ -932,6 +940,22 @@ impl ConversationService {
         note: Option<String>,
     ) -> Result<(), ConversationError> {
         let now = Utc::now();
+        // One decision at a time per binding. Released on every exit path.
+        struct Deciding<'a>(&'a Mutex<HashSet<String>>, String);
+        impl Drop for Deciding<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut set) = self.0.lock() {
+                    set.remove(&self.1);
+                }
+            }
+        }
+        if !self.deciding.lock().unwrap().insert(binding_id.to_string()) {
+            return Err(ConversationError::AlreadyResolved(
+                binding_id.to_string(),
+                BindingState::Pending,
+            ));
+        }
+        let _deciding = Deciding(&self.deciding, binding_id.to_string());
         // Snapshot + liveness checks under one lock.
         {
             let bindings = self.bindings.lock().unwrap();
@@ -1353,7 +1377,7 @@ mod tests {
                 linked_at: Utc::now(),
             })
             .unwrap();
-        let vault = Arc::new(VaultBroker::open(home.path().join("vault.t3rnel"), false));
+        let vault = Arc::new(VaultBroker::open(home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME), false));
         vault
             .unlock_ordered(Some(Zeroizing::new([3u8; 32])))
             .unwrap();
@@ -1694,20 +1718,20 @@ mod tests {
 
     #[test]
     fn reply_parser_covers_yes_no_defer_and_ids() {
-        assert_eq!(
-            ConversationService::parse_reply("YES"),
-            Some((ApprovalVerdict::Approve, None))
-        );
-        assert_eq!(
-            ConversationService::parse_reply("no ab-000007"),
-            Some((ApprovalVerdict::Deny, Some("AB-000007".into())))
-        );
-        assert_eq!(
-            ConversationService::parse_reply("Defer"),
-            Some((ApprovalVerdict::Defer, None))
-        );
+        assert_eq!(ConversationService::parse_reply("YES"), Some((ApprovalVerdict::Approve, None)));
+        assert_eq!(ConversationService::parse_reply("yes."), Some((ApprovalVerdict::Approve, None)));
+        assert_eq!(ConversationService::parse_reply("no ab-000007"), Some((ApprovalVerdict::Deny, Some("AB-000007".into()))));
+        assert_eq!(ConversationService::parse_reply("Defer"), Some((ApprovalVerdict::Defer, None)));
         assert_eq!(ConversationService::parse_reply("maybe later?"), None);
         assert_eq!(ConversationService::parse_reply(""), None);
+    }
+
+    #[test]
+    fn casual_replies_are_not_consent() {
+        // These all began with an approving first word and so approved a pending payment.
+        for text in ["ok", "OK", "ok thanks", "yes but only if it is under $5", "yes please do it now", "sure", "yep", "approve it later maybe", "k"] {
+            assert_eq!(ConversationService::parse_reply(text), None, "{text:?} must not decide an approval");
+        }
     }
 
     #[tokio::test]
@@ -1745,5 +1769,51 @@ mod tests {
             f.service.binding(&b.id).unwrap().state,
             BindingState::Approved
         );
+    }
+
+    #[tokio::test]
+    async fn another_member_of_a_group_thread_cannot_answer_for_the_person_asked() {
+        let f = fixture();
+        f.service.registry().connect_all().await.into_iter().for_each(|(_, r)| r.unwrap());
+        // The owner talks in a shared thread first, so the thread exists.
+        let mut hello = inbound("hello");
+        hello.thread_key = "group-1".into();
+        f.service.handle_inbound(hello).await.unwrap();
+        let pref = f.approvals.add("pay.send", "pay 500 to supplier");
+        let binding = f
+            .service
+            .deliver_approval("local:web", "web", "+1555", "group-1", "pay.send", "pay 500 to supplier", "high", Some(pref.clone()), None)
+            .await
+            .unwrap();
+        // Someone else in the same thread says YES. Before the fix this approved the payment.
+        let mut intruder = inbound("YES");
+        intruder.sender = "+1999".into();
+        intruder.thread_key = "group-1".into();
+        let routed = f.service.handle_inbound(intruder).await.unwrap();
+        assert!(matches!(routed, RoutedInbound::AgentMessage { .. }), "a non-addressee reply is ordinary chat: {routed:?}");
+        assert_eq!(f.service.binding(&binding.id).unwrap().state, BindingState::Pending);
+        assert_eq!(f.approvals.lookup(&pref).await.unwrap().unwrap().state, "pending");
+        // The person who was asked can still answer.
+        let mut owner = inbound("YES");
+        owner.thread_key = "group-1".into();
+        assert!(matches!(f.service.handle_inbound(owner).await.unwrap(), RoutedInbound::ApprovalDecided { .. }));
+    }
+
+    #[tokio::test]
+    async fn two_simultaneous_replies_decide_a_binding_once() {
+        let f = fixture();
+        f.service.registry().connect_all().await.into_iter().for_each(|(_, r)| r.unwrap());
+        let pref = f.approvals.add("pay.send", "pay 5");
+        let binding = f
+            .service
+            .deliver_approval("local:web", "web", "+1555", "+1555", "pay.send", "pay 5", "high", Some(pref), None)
+            .await
+            .unwrap();
+        let (a, b) = tokio::join!(
+            f.service.resolve_binding(&binding.id, ApprovalVerdict::Approve, "reply-1", None),
+            f.service.resolve_binding(&binding.id, ApprovalVerdict::Approve, "reply-2", None),
+        );
+        assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1, "exactly one decision: {a:?} / {b:?}");
+        assert_eq!(f.service.binding(&binding.id).unwrap().state, BindingState::Approved);
     }
 }

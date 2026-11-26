@@ -60,13 +60,8 @@ impl DevSigner {
         let mut seed = [0u8; 32];
         use rand::RngCore;
         rand::thread_rng().fill_bytes(&mut seed);
-        fs::write(&path, seed)?;
-        // Best-effort restriction to owner-only.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-        }
+        crate::plugin_lifecycle::write_private_new(&path, &seed)?;
+        // (created owner-only from the first byte)
         Ok(SigningKey::from_bytes(&seed))
     }
 
@@ -80,6 +75,7 @@ impl DevSigner {
     /// `signer.pub` over the manifest.json bytes — exactly what
     /// [`PluginManager::verify_signature`] checks.
     pub fn sign_package(&self, pkg: &Path) -> Result<(), LifecycleError> {
+        crate::plugin_lifecycle::seal_package_files(pkg)?;
         let manifest_bytes = fs::read(pkg.join("manifest.json"))
             .map_err(|_| LifecycleError::Manifest("manifest.json missing".into()))?;
         let sk = self.load_or_generate()?;
@@ -241,6 +237,7 @@ mod tests {
             migrations: vec![],
             permissions_summary: vec![],
             entitlement_account: None,
+            files: Default::default(),
         };
         fs::write(
             pkg.join("manifest.json"),

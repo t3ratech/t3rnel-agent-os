@@ -17,6 +17,7 @@ members = [
     "crates/t3rnel-extensions",
     "crates/t3rnel-mcp",
     "bridge",
+    "sdk/rust/t3rnel-egress",
     "xtask",
 ]
 
