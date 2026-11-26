@@ -4991,7 +4991,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.9",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "dashmap",
  "dirs",
@@ -5063,7 +5063,7 @@ dependencies = [
  "aes 0.9.4",
  "async-trait",
  "axum 0.8.9",
- "base64 0.22.1",
+ "base64 0.23.1",
  "cbc",
  "chrono",
  "dashmap",
@@ -5132,7 +5132,7 @@ dependencies = [
 name = "t3rnel-egress"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "hex",
  "hmac",
  "reqwest 0.12.28",
@@ -5160,7 +5160,7 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "axum 0.8.9",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "dashmap",
  "dirs",
@@ -5186,7 +5186,7 @@ dependencies = [
 name = "t3rnel-hands"
 version = "0.6.4"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "dashmap",
  "dirs",
@@ -5336,7 +5336,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.9",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "dashmap",

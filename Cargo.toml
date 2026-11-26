@@ -83,7 +83,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 async-trait = "0.1"
 
 # Base64
-base64 = "0.22"
+base64 = "0.23"
 
 # Bytes
 bytes = "1"
