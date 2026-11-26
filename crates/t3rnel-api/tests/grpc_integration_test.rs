@@ -77,6 +77,7 @@ async fn start_grpc_server_with_api_key(api_key: &str) -> TestGrpcServer {
         health_tracker: Arc::new(
             t3rnel_runtime::drivers::health_tracker::InMemoryHealthTracker::new(100),
         ),
+        plugin_dispatch: None,
     });
     let addr = t3rnel_api::grpc::start_grpc_server(state.clone(), 0)
         .await

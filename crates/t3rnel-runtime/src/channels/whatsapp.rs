@@ -202,6 +202,63 @@ impl WhatsAppAdapter {
         ))
     }
 
+    /// Resolve an inbound [`AttachmentRef::reference`] (the gateway message
+    /// id carried on `/inbound/events`) into the media bytes via
+    /// `GET {gateway}/media/{id}`. Returns `(bytes, mime)` where `mime` comes
+    /// from the response `Content-Type` (falling back to the event's
+    /// `media_mime` hint supplied by the caller).
+    ///
+    /// The gateway only retains recent inbound media (bounded, per-session),
+    /// so an expired/unknown id surfaces as `ChannelError::Poll`-style Io —
+    /// callers should treat it as "attachment no longer available", not a
+    /// transport failure worth retrying forever.
+    pub async fn fetch_attachment(
+        &self,
+        reference: &str,
+    ) -> Result<(Vec<u8>, Option<String>), ChannelError> {
+        if reference.is_empty() {
+            return Err(ChannelError::Io("empty media reference".to_string()));
+        }
+        // Prefer the already-resolved session URL; fall back to full
+        // resolution (starter/env) so fetches work before the first poll.
+        let cached = self.state.lock().unwrap().url.clone();
+        let url = match cached {
+            Some(u) => u,
+            None => self.resolve_url().await?,
+        };
+        let resp = self
+            .client
+            .get(format!("{url}/media/{}", reference))
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| ChannelError::Io(format!("whatsapp gateway /media failed: {e}")))?;
+        let status = resp.status();
+        let mime = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(ChannelError::Io(format!(
+                "media {reference} unknown or expired on the gateway"
+            )));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ChannelError::Io(format!(
+                "whatsapp gateway /media returned {status}: {}",
+                body.chars().take(200).collect::<String>()
+            )));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| ChannelError::Io(format!("whatsapp gateway /media read failed: {e}")))?
+            .to_vec();
+        Ok((bytes, mime))
+    }
+
     fn link_state_for(linked: bool, connected: bool) -> WhatsAppLinkState {
         match (linked, connected) {
             (true, true) => WhatsAppLinkState::Connected,
@@ -237,6 +294,10 @@ struct GatewayInboundEvent {
     text: String,
     #[serde(default)]
     is_group: bool,
+    /// MIME type of the message's media attachment, when it carried one
+    /// (gateway `media_mime` field; absent on text-only events).
+    #[serde(default)]
+    media_mime: Option<String>,
     /// Epoch seconds.
     #[serde(default)]
     ts: i64,
@@ -298,12 +359,14 @@ impl WhatsAppAdapter {
 
         let mut attachments = Vec::new();
         if let Some(kind) = media_placeholder_kind(&ev.text) {
-            // The gateway does not (yet) expose media download handles; the
-            // message id is the opaque handle an operator can correlate.
+            // The message id doubles as the media handle: the gateway keeps
+            // the Baileys message and serves its bytes at GET /media/{id}
+            // (see `fetch_attachment`). `media_mime` types the ref when the
+            // gateway reported it.
             attachments.push(AttachmentRef {
                 kind: kind.to_string(),
                 reference: ev.id.clone().unwrap_or_default(),
-                mime: None,
+                mime: ev.media_mime.clone(),
                 caption: None,
             });
         }

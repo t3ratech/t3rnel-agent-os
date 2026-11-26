@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::{Query, State as AxumState},
-    http::StatusCode,
+    extract::{Path, Query, State as AxumState},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -29,6 +30,8 @@ struct MockGateway {
     files: Mutex<Vec<Value>>,
     /// Inbound events the fake gateway will hand out via /inbound/events.
     inbound: Mutex<Vec<GatewayInboundEvent>>,
+    /// Media bytes served at GET /media/{id} (id -> (bytes, mime)).
+    media: Mutex<BTreeMap<String, (Vec<u8>, String)>>,
     latest_seq: Mutex<u64>,
     linked: Mutex<bool>,
     connected: Mutex<bool>,
@@ -99,11 +102,31 @@ async fn mock_file(
     Json(json!({ "ok": true }))
 }
 
+async fn mock_media(
+    AxumState(gw): AxumState<Arc<MockGateway>>,
+    Path(id): Path<String>,
+) -> Response {
+    match gw.media.lock().unwrap().get(&id) {
+        Some((bytes, mime)) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, mime.clone())],
+            bytes.clone(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "unknown or expired media id" })),
+        )
+            .into_response(),
+    }
+}
+
 async fn spawn_mock_gateway(gw: Arc<MockGateway>) -> String {
     let app = Router::new()
         .route("/health", get(mock_health))
         .route("/linked", get(mock_linked))
         .route("/inbound/events", get(mock_events))
+        .route("/media/{id}", get(mock_media))
         .route("/message/send", post(mock_send))
         .route("/file", post(mock_file))
         .with_state(gw);
@@ -125,6 +148,7 @@ fn gw_event(seq: u64, text: &str) -> GatewayInboundEvent {
         push_name: "Tester".to_string(),
         text: text.to_string(),
         is_group: false,
+        media_mime: None,
         ts: 1_700_000_000,
     }
 }
@@ -215,6 +239,17 @@ async fn gateway_connect_send_poll_roundtrip() {
     assert_eq!(events[2].attachments.len(), 1);
     assert_eq!(events[2].attachments[0].kind, "image");
     assert_eq!(events[2].attachments[0].reference, "wamid.mock.3");
+
+    // Attachment resolution: the message id fetches bytes via /media/{id}.
+    gw.media.lock().unwrap().insert(
+        "wamid.mock.3".to_string(),
+        (b"fake-jpeg-bytes".to_vec(), "image/jpeg".to_string()),
+    );
+    let (bytes, mime) = adapter.fetch_attachment("wamid.mock.3").await.unwrap();
+    assert_eq!(bytes, b"fake-jpeg-bytes");
+    assert_eq!(mime.as_deref(), Some("image/jpeg"));
+    // Unknown/expired ids fail honestly.
+    assert!(adapter.fetch_attachment("wamid.unknown").await.is_err());
 
     // Cursor advanced — second poll returns nothing.
     assert!(adapter.poll_inbound().await.unwrap().is_empty());

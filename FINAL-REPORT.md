@@ -6,7 +6,7 @@
 
 - **Test status: GREEN.** Every touched crate and all 11 plugin crates pass their scoped suites — 383 tests run, 0 failures — after fixing two real defects found during verification (stale test code that did not compile at HEAD).
 - **Audit status: CONDITIONAL GO.** The new surface is genuinely hardened (fail-closed sandbox, pinned-DNS egress proxy, sealed packages, single-use exact-action approvals, host/plugin state separation). Two MEDIUM findings and several LOW/INFO items are listed below; none are release-blocking for a local single-user daemon, but the MEDIUMs should be fixed before plugins carry high-value credentials at scale.
-- **Ship verdict: CONDITIONAL.** The signed-plugin pipeline is proven end-to-end, but production dispatch is still unwired (gRPC/tonic, manifest→host-config, OAuth consent→vault, agent-message consumer). See "Remaining blockers".
+- **Ship verdict: CONDITIONAL.** The signed-plugin pipeline is proven end-to-end and the gRPC dispatch is live-proven on a scratch host (session 14), but production readiness still needs the live-daemon smoke, OAuth consent→vault through a real flow, and TUF. See "Remaining blockers".
 - **Repo state:** public repo `t3rnel-agent-os` @ `4d8d50c` was clean at session start; this session left **two uncommitted fixes** (see "Changes made") plus this report. No commits/pushes were made, per instructions.
 
 ---
@@ -102,11 +102,11 @@ Both fixes are **uncommitted** in their respective repos (public repo + private 
 
 | Blocker | Status |
 |---|---|
-| gRPC/tonic dispatch for the 14 host services + PluginCallbacks | **LANDED (uncommitted, session 13)**: `plugin_grpc.rs` + `build.rs` (tonic-build via protoc-bin-vendored) implement all 14 host services + PluginCallbacks client cache; manifest→`PluginHostConfig` wiring via signed `permissions` block; daemon serves on `plugin_grpc_addr` (default 127.0.0.1:50061). LIVE daemon↔plugin-binary smoke still pending |
+| gRPC/tonic dispatch for the 14 host services + PluginCallbacks | **LIVE-PROVEN (uncommitted, session 14)**: scratch-home `plugin_dispatch` example host on 127.0.0.1:50099 + real comms plugin binary over `T3RNEL_PLUGIN_ADDR` — plugin→host RPCs verified in host-side `plugin.db` (memory kv, schedule job, notify enqueue, audit), `PluginCallbacks.ScheduleTick` fired ~30 s `outcome=ok`, `plugin_health` → `PLUGIN HEALTH OK` with 4 mounted routes; comms REST `/healthz` `/plugin/threads` `/plugin/status` `/plugin/briefing` all ok. Live *daemon* (port 50061)↔plugin proof still pending |
 | OAuth consent flow → `store_grant` | **WIRED (uncommitted)**: `begin_pkce_flow`/`exchange_code`/`finish_pkce_flow` split in `t3rnel-extensions/src/oauth.rs`; `POST /api/plugins/oauth/{start,complete}` + `GET /status` in `plugin_admin.rs` persist via `ScopedTokenService::store_grant`. Mock-provider live test pending |
 | TUF release trust (§14.11) | throwaway proof key only; no key custody/transparency-log work |
 | Agent-message dispatch consumer | **WIRED (uncommitted)**: server.rs inbound loop dispatches `RoutedInbound::AgentMessage{agent_id}` to `send_message_with_handle_and_blocks` and returns the reply via `ConversationService::send_message` |
-| WhatsApp media download endpoint | **STILL OPEN** — gateway `GET /media/:id` + adapter attachment resolution not implemented |
+| WhatsApp media download endpoint | **DONE (uncommitted, session 14)**: gateway `GET /media/:id` serves `downloadMediaMessage` bytes from a bounded 300-entry inbound media map; `WhatsAppAdapter::fetch_attachment` resolves `AttachmentRef` → bytes+mime, 404 → honest expired/unknown error; covered by `gateway_connect_send_poll_roundtrip` media assertions |
 | Business webhook `X-Hub-Signature-256` | **PARTIAL (uncommitted)**: `BusinessWebhookState::signature_valid` + `:app-secret` vault secret + fail-closed check in `wa_business_events` when configured; app-secret provisioning UX still open |
 | WhatsApp double-processing | gateway still forwards to agents directly AND adapter emits ConversationEvents — legacy path must be gated/retired |
 | `t3rnel plugin` CLI + inotify dev watcher | requested in `CLI-WIRING-REQUESTS.md` (owner-reserved `t3rnel-cli`) |
@@ -114,6 +114,6 @@ Both fixes are **uncommitted** in their respective repos (public repo + private 
 
 ## 8. Ship-readiness verdict
 
-**CONDITIONAL.** The plugin-OS *foundations* are real, tested (383 green), and security-reviewed — install/sign/verify/rollback/sandbox/egress/auth are production-quality code, not stubs. It is **not yet a shippable plugin runtime**: nothing dispatches a plugin's host-service calls in production (gRPC layer absent), OAuth grants never reach the vault through a real flow, and the two MEDIUM audit items (F1 scope bypass on `oauth-access:`, F2 unpinned token endpoint) should be closed before third-party/signed-community plugins carry valuable credentials.
+**CONDITIONAL.** The plugin-OS *foundations* are real, tested (383 green), and security-reviewed — install/sign/verify/rollback/sandbox/egress/auth are production-quality code, not stubs. Session 14 changed the dispatch picture: the gRPC/tonic dispatch layer **exists and is live-proven** against a real plugin binary on a scratch host (all 14 host services + PluginCallbacks round-trips verified), and the daemon is wired to serve it on `plugin_grpc_addr` — but the live *daemon*↔plugin proof, OAuth grants through a real consent flow, TUF release trust, and the two MEDIUM audit items (F1 scope bypass on `oauth-access:`, F2 unpinned token endpoint) remain before this is a shippable plugin runtime for third-party/signed-community plugins carrying valuable credentials.
 
-Recommended order: (1) commit the two test-compile fixes + this report; (2) fix F1/F2; (3) land buf/protoc + gRPC dispatch + manifest→host wiring; (4) wire OAuth consent→`store_grant`; (5) TUF before public plugin distribution.
+Recommended order: (1) commit the test-compile fixes + session-13/14 work + this report; (2) fix F1/F2; (3) live-daemon dispatch smoke + OAuth mock-provider flow; (4) TUF before public plugin distribution.

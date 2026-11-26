@@ -843,6 +843,42 @@ service Auth {
 }
 
 // ---------------------------------------------------------------------------
+// conversations — outbound channel messages + thread stats (18 §2/§5)
+// ---------------------------------------------------------------------------
+
+// Send one outbound message into a channel thread. The core owns transport
+// and credentials; the plugin declares what, never how.
+message ConversationSendRequest {
+  PluginIdentity plugin = 1;
+  // Channel adapter id, e.g. "whatsapp", "telegram".
+  string channel = 2;
+  // Linked account the message goes out through.
+  string account = 3;
+  // Channel thread/conversation key.
+  string thread_key = 4;
+  string text = 5;
+}
+message ConversationSendResponse {
+  // Opaque receipt id for correlation/audit.
+  string receipt = 1;
+}
+
+// Core-side conversation counters for briefing/status reports.
+message ConversationStatsRequest { PluginIdentity plugin = 1; }
+message ConversationStatsResponse {
+  uint64 threads_total = 1;
+  uint64 unread_threads = 2;
+  uint64 inbound_today = 3;
+  uint64 outbound_today = 4;
+  uint64 pending_approvals = 5;
+}
+
+service Conversations {
+  rpc Send(ConversationSendRequest) returns (ConversationSendResponse);
+  rpc Stats(ConversationStatsRequest) returns (ConversationStatsResponse);
+}
+
+// ---------------------------------------------------------------------------
 // PluginCallbacks — implemented BY the plugin, called BY the core
 // ---------------------------------------------------------------------------
 

@@ -130,6 +130,7 @@ async fn test_full_daemon_lifecycle() {
         health_tracker: Arc::new(
             t3rnel_runtime::drivers::health_tracker::InMemoryHealthTracker::new(100),
         ),
+        plugin_dispatch: None,
     });
 
     let app = Router::new()
@@ -269,6 +270,7 @@ async fn test_server_immediate_responsiveness() {
         health_tracker: Arc::new(
             t3rnel_runtime::drivers::health_tracker::InMemoryHealthTracker::new(100),
         ),
+        plugin_dispatch: None,
     });
 
     let app = Router::new()

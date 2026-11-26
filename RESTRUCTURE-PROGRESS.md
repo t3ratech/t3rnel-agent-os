@@ -419,3 +419,61 @@ edition-2021 on touched files; no stub markers; test binaries deleted.
 `GET /media/:id` + adapter attachment resolution; `X-Hub-Signature-256`
 app-secret HMAC on the Business webhook; TUF roles (§14.11); live
 daemon proof of dispatch↔plugin binary and oauth mock-provider flow.
+
+## Session 14 additions — live gRPC smoke PROVEN + WhatsApp media download (uncommitted)
+
+- **LIVE dispatch↔plugin-binary smoke: PASSED.** `cargo build -p
+  t3rnel-runtime --example plugin_dispatch` produces a scratch-home
+  (`/tmp/t3rnel-plugin-smoke`) `PluginDispatch` host on
+  `127.0.0.1:50099`. The real comms plugin binary
+  (`plugins/.target/debug/plugin`, built from `plugins/comms`) run with
+  `T3RNEL_PLUGIN_ADDR=http://127.0.0.1:50099
+  T3RNEL_PLUGIN_HOME=/tmp/comms-state` connected over gRPC:
+  - plugin→host RPCs proven host-side in
+    `plugins/org.t3rnel.comms/data/plugin.db`: `plugin_kv` memory writes
+    (`memory^_comms:state`, `memory^_briefing:*`), `host_state` schedule
+    job `comms-morning-briefing` + `notify:*` enqueue rows,
+    `plugin_audit` rows `schedule.tick outcome=ok` + `notify.enqueue`.
+  - core→plugin `PluginCallbacks` proven twice: `ScheduleTick` fired
+    every ~30 s with `outcome=ok` (audit rows above), and
+    `PluginDispatch::plugin_health` returned
+    `PLUGIN HEALTH OK: ok routes=["/plugin/inbound","/plugin/status",
+    "/plugin/briefing","/plugin/threads"]` — the four routes the plugin
+    registered via the `mount_routes` host RPC.
+  - comms ops REST verified live on `127.0.0.1:4780`:
+    `/healthz`, `/plugin/threads`, `/plugin/status`, `/plugin/briefing`
+    all `ok:true`.
+- **Smoke-host fixes**: `plugin_dispatch.rs` example now passes
+  `.with_vault_key(...)` — without a host key the scratch-home vault
+  reports `Locked` and `PluginHost::open` fails (correct §14.14
+  fail-closed behaviour). `plugin_sandbox.rs` test needed parens around
+  `as usize` casts before `<` (Rust parses it as generic args — was a
+  hard error in the lib-test target).
+- **Tooling hazard found**: `plugins/.target/debug/plugin` is a shared
+  bin name across all 9 connector plugins — whichever plugin built last
+  owns the file (observed it flip comms→social→comms as the live
+  daemon's installer rebuilt). Smoke runs must copy the binary out
+  (`cp .target/debug/plugin /tmp/comms-plugin`) immediately after
+  `cargo build` in the specific plugin dir.
+- **WhatsApp media download (was "STILL OPEN"): DONE (uncommitted).**
+  `packages/whatsapp-gateway/index.js` keeps authorized inbound media
+  messages in a bounded map (300, FIFO) keyed by message id — Baileys
+  media is E2E-encrypted and only downloadable against the original
+  message — and serves `GET /media/:id` via `downloadMediaMessage`.
+  `crates/t3rnel-runtime/src/channels/whatsapp.rs` adds
+  `WhatsAppAdapter::fetch_attachment(reference)` →
+  `GET {gateway}/media/{id}` with mime from `Content-Type`; 404 →
+  honest "unknown or expired" error. `GatewayInboundEvent` gains
+  `media_mime`; the poll path now resolves media events into real
+  `AttachmentRef`s instead of placeholder text only.
+- **Checks**: `cargo clippy -p t3rnel-runtime -p t3rnel-api
+  -p t3rnel-extensions -p t3rnel-types --all-targets -- -D warnings`
+  clean (exit 0); `cargo test -p t3rnel-runtime whatsapp` — 10/10 pass
+  incl. media fetch assertions inside
+  `gateway_connect_send_poll_roundtrip`; rustfmt edition-2021 on all
+  touched files.
+
+**Still open**: TUF roles (§14.11); OAuth mock-provider live flow;
+`X-Hub-Signature-256` app-secret provisioning UX; WhatsApp legacy
+double-processing gate; `t3rnel plugin` CLI + inotify watcher;
+audit findings F1/F2; live *daemon* (not scratch host) dispatch proof.

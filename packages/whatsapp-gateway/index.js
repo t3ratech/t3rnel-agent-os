@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import pino from 'pino';
 import { daemonUrl, isLinkOnly, routeMessage, sitesmithCommand } from './lib/routing.js';
@@ -284,6 +284,47 @@ function recordInboundEvent(evt) {
 }
 
 // ---------------------------------------------------------------------------
+// Inbound media store — Baileys media is end-to-end encrypted and can only be
+// downloaded against the original message object, so authorized inbound
+// media messages are kept in a bounded map keyed by message id. The
+// conversation adapter resolves an AttachmentRef (the message id) via
+// GET /media/:id.
+// ---------------------------------------------------------------------------
+const MEDIA_STORE_MAX = 300;
+const recentMedia = new Map(); // msg.key.id -> { msg, mime, fileName }
+
+/** Extract media metadata (unwrapping view-once/ephemeral envelopes). */
+function mediaInfoOf(msg) {
+  const m = msg?.message;
+  const inner = m?.ephemeralMessage?.message
+    || m?.viewOnceMessage?.message
+    || m?.viewOnceMessageV2?.message
+    || m;
+  for (const k of ['imageMessage', 'audioMessage', 'videoMessage', 'documentMessage', 'stickerMessage']) {
+    const mm = inner?.[k];
+    if (mm) {
+      return {
+        mime: mm.mimetype || 'application/octet-stream',
+        fileName: mm.fileName || null,
+      };
+    }
+  }
+  return null;
+}
+
+/** Keep an authorized inbound media message retrievable via /media/:id. */
+function rememberMedia(msg) {
+  const id = msg?.key?.id;
+  if (!id) return;
+  const info = mediaInfoOf(msg);
+  if (!info) return;
+  recentMedia.set(id, { msg, mime: info.mime, fileName: info.fileName });
+  if (recentMedia.size > MEDIA_STORE_MAX) {
+    recentMedia.delete(recentMedia.keys().next().value);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Baileys connection
 // ---------------------------------------------------------------------------
 async function startConnection() {
@@ -469,6 +510,12 @@ async function startConnection() {
       const pushName = msg.pushName || phone;
       const replyJid = dmReplyJid(senderJid, remoteJid, isGroup, lidToPhone);
 
+      // Media: keep the message retrievable via GET /media/:id and surface
+      // its MIME type on the inbound event so the adapter can type the
+      // AttachmentRef without a second round-trip.
+      const mediaInfo = mediaInfoOf(msg);
+      if (mediaInfo) rememberMedia(msg);
+
       // Buffer for the conversation-service channel adapter (18 §3). Every
       // authorized inbound message is recorded — including link-only and
       // sitesmith-command texts — so threads/approvals see the full stream.
@@ -478,6 +525,7 @@ async function startConnection() {
         sender: senderJid,
         phone,
         push_name: pushName,
+        media_mime: mediaInfo ? mediaInfo.mime : null,
         text,
         is_group: isGroup,
         ts: Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000),
@@ -1075,6 +1123,53 @@ const server = http.createServer(async (req, res) => {
         connected: connStatus === 'connected',
         number: credsExists ? linkedNumber() : '',
       });
+    }
+
+    // GET /media/:id — download an inbound media message's bytes.
+    //
+    // Baileys media is E2E-encrypted and only decryptable against the
+    // original message object, so authorized inbound media messages are
+    // kept in `recentMedia` (bounded) keyed by `msg.key.id` — the same id
+    // the /inbound/events feed puts in `id` and the adapter puts in
+    // `AttachmentRef.reference`. Unknown/expired ids 404; a disconnected
+    // socket 503s (media keys rotate with the session).
+    if (req.method === 'GET' && pathname.startsWith('/media/')) {
+      const id = decodeURIComponent(pathname.slice('/media/'.length));
+      const entry = recentMedia.get(id);
+      if (!entry) {
+        return jsonResponse(res, 404, { error: 'unknown or expired media id' });
+      }
+      if (connStatus !== 'connected' || !sock) {
+        return jsonResponse(res, 503, {
+          error: `WhatsApp is not connected (${statusMessage})`,
+        });
+      }
+      try {
+        const buffer = await downloadMediaMessage(
+          entry.msg,
+          'buffer',
+          {},
+          {
+            logger: pino({ level: 'warn' }),
+            reuploadRequest: sock.updateMediaMessage,
+          },
+        );
+        const headers = {
+          'Content-Type': entry.mime,
+          'Content-Length': buffer.length,
+          'Access-Control-Allow-Origin': '*',
+        };
+        if (entry.fileName) {
+          const safe = String(entry.fileName).replace(/["\r\n]/g, '_');
+          headers['Content-Disposition'] = `inline; filename="${safe}"`;
+        }
+        res.writeHead(200, headers);
+        res.end(buffer);
+        console.log(`[gateway] media ${id.slice(0, 24)} served (${buffer.length} bytes, ${entry.mime})`);
+      } catch (err) {
+        return jsonResponse(res, 502, { error: `media download failed: ${err.message}` });
+      }
+      return;
     }
 
     // GET /health — health check

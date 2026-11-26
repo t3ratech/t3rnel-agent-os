@@ -74,6 +74,7 @@ async fn start_test_server() -> TestServer {
         health_tracker: Arc::new(
             t3rnel_runtime::drivers::health_tracker::InMemoryHealthTracker::new(100),
         ),
+        plugin_dispatch: None,
     });
 
     let app = Router::new()

@@ -1064,8 +1064,8 @@ mod tests {
         for (i, insn) in prog.iter().enumerate() {
             if insn.code == 0x15 || insn.code == 0x45 {
                 assert!(
-                    i + 1 + insn.jt as usize <= prog.len() - 1
-                        && i + 1 + insn.jf as usize <= prog.len() - 1,
+                    i + 1 + (insn.jt as usize) < prog.len()
+                        && i + 1 + (insn.jf as usize) < prog.len(),
                     "jump {i} leaves the program"
                 );
             }

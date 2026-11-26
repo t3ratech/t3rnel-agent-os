@@ -344,14 +344,12 @@ impl PluginManager {
         // list is "trust nobody", not "trust anyone": a package signed with a
         // key the attacker made up verifies perfectly against its own signer.pub.
         // Developer mode alone may accept a signer it does not know.
-        if !opts.trusted_keys.iter().any(|k| k == &signer_hex) {
-            if !opts.dev_mode {
-                return Err(LifecycleError::Signature(if opts.trusted_keys.is_empty() {
-                    "no trusted signers are configured (plugin_trusted_signers is empty)".into()
-                } else {
-                    format!("untrusted signer {signer_hex}")
-                }));
-            }
+        if !opts.trusted_keys.iter().any(|k| k == &signer_hex) && !opts.dev_mode {
+            return Err(LifecycleError::Signature(if opts.trusted_keys.is_empty() {
+                "no trusted signers are configured (plugin_trusted_signers is empty)".into()
+            } else {
+                format!("untrusted signer {signer_hex}")
+            }));
         }
         let key_bytes = hex::decode(&signer_hex)
             .map_err(|_| LifecycleError::Signature("signer.pub not hex".into()))?;

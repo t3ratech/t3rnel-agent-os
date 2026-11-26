@@ -168,8 +168,8 @@ fn default_source_entry() -> String {
 /// A parsed `manifest.yaml`: either the lite package schema or the full
 /// bridge manifest v1. Detected by the presence of `manifest_version`.
 enum SourceSpec {
-    Lite(SourceManifest),
-    V1(t3rnel_bridge::manifest::Manifest),
+    Lite(Box<SourceManifest>),
+    V1(Box<t3rnel_bridge::manifest::Manifest>),
 }
 
 fn parse_source_manifest(yaml: &str, path: &Path) -> Result<SourceSpec, SignError> {
@@ -177,11 +177,11 @@ fn parse_source_manifest(yaml: &str, path: &Path) -> Result<SourceSpec, SignErro
     // for the reference-plugin layout; a `manifest_version` key means the
     // author intended the canonical v1 schema instead.
     match serde_yaml::from_str::<SourceManifest>(yaml) {
-        Ok(m) => Ok(SourceSpec::Lite(m)),
+        Ok(m) => Ok(SourceSpec::Lite(Box::new(m))),
         Err(lite_err) => {
             if yaml.contains("manifest_version") {
                 t3rnel_bridge::manifest::Manifest::parse(yaml)
-                    .map(SourceSpec::V1)
+                    .map(|m| SourceSpec::V1(Box::new(m)))
                     .map_err(|e| SignError::Manifest(format!("{}: {e}", path.display())))
             } else {
                 Err(SignError::Manifest(format!(

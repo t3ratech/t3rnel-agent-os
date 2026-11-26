@@ -348,7 +348,7 @@ impl PluginDispatch {
 
     /// The PluginCallbacks client for `plugin_id`, if the plugin connected
     /// one. Core→plugin calls fail UNAVAILABLE until then.
-    pub fn callbacks(&self, plugin_id: &str) -> Result<CallbacksClient<Channel>, Status> {
+    pub fn callbacks(&self, plugin_id: &str) -> Result<CallbacksClient<Channel>, Box<Status>> {
         self.inner
             .callbacks
             .lock()
@@ -356,7 +356,9 @@ impl PluginDispatch {
             .get(plugin_id)
             .cloned()
             .ok_or_else(|| {
-                Status::unavailable(format!("plugin {plugin_id} has no callback channel"))
+                Box::new(Status::unavailable(format!(
+                    "plugin {plugin_id} has no callback channel"
+                )))
             })
     }
 
@@ -366,7 +368,7 @@ impl PluginDispatch {
         &self,
         md: &tonic::metadata::MetadataMap,
         identity: Option<&pb::PluginIdentity>,
-    ) -> Result<(Option<String>, Option<String>), Status> {
+    ) -> Result<(Option<String>, Option<String>), Box<Status>> {
         let meta_id = md
             .get(META_PLUGIN_ID)
             .and_then(|v| v.to_str().ok())
@@ -377,9 +379,9 @@ impl PluginDispatch {
             .map(|s| s.to_string());
         if let (Some(m), Some(i)) = (&meta_id, identity) {
             if !i.id.is_empty() && m != &i.id {
-                return Err(Status::permission_denied(
+                return Err(Box::new(Status::permission_denied(
                     "x-plugin-id metadata does not match plugin identity",
-                ));
+                )));
             }
         }
         Ok((meta_id.or_else(|| identity.map(|i| i.id.clone())), callback))
@@ -391,7 +393,7 @@ impl PluginDispatch {
         md: &tonic::metadata::MetadataMap,
         identity: Option<&pb::PluginIdentity>,
     ) -> Result<Arc<PluginRuntime>, Status> {
-        let (_id, callback) = self.identity_and_callback(md, identity)?;
+        let (_id, callback) = self.identity_and_callback(md, identity).map_err(|e| *e)?;
         self.ensure_plugin(identity, callback.as_deref()).await
     }
 
@@ -405,7 +407,7 @@ impl PluginDispatch {
         plugin_id: &str,
         request: pb::ToolCallRequest,
     ) -> Result<pb::ToolCallResponse, Status> {
-        let mut client = self.callbacks(plugin_id)?;
+        let mut client = self.callbacks(plugin_id).map_err(|e| *e)?;
         client
             .call_tool(request)
             .await
@@ -419,7 +421,7 @@ impl PluginDispatch {
         plugin_id: &str,
         request: pb::RouteRequest,
     ) -> Result<pb::RouteResponse, Status> {
-        let mut client = self.callbacks(plugin_id)?;
+        let mut client = self.callbacks(plugin_id).map_err(|e| *e)?;
         client
             .handle_route(request)
             .await
@@ -433,7 +435,7 @@ impl PluginDispatch {
         plugin_id: &str,
         request: pb::HealthRequest,
     ) -> Result<pb::HealthResponse, Status> {
-        let mut client = self.callbacks(plugin_id)?;
+        let mut client = self.callbacks(plugin_id).map_err(|e| *e)?;
         client
             .health(request)
             .await
@@ -449,7 +451,7 @@ impl PluginDispatch {
         plugin_id: &str,
         request: pb::BriefingQueryRequest,
     ) -> Result<pb::BriefingReport, Status> {
-        let mut client = self.callbacks(plugin_id)?;
+        let mut client = self.callbacks(plugin_id).map_err(|e| *e)?;
         client
             .briefing_query(request)
             .await
@@ -463,7 +465,7 @@ impl PluginDispatch {
         plugin_id: &str,
         request: pb::StatusQueryRequest,
     ) -> Result<pb::StatusReport, Status> {
-        let mut client = self.callbacks(plugin_id)?;
+        let mut client = self.callbacks(plugin_id).map_err(|e| *e)?;
         client
             .status_query(request)
             .await
@@ -496,7 +498,7 @@ impl PluginDispatch {
                 Err(_) => continue,
             };
             for job in due {
-                let mut client = match self.callbacks(&pid) {
+                let mut client = match self.callbacks(&pid).map_err(|e| *e) {
                     Ok(c) => c,
                     Err(_) => {
                         out.push((pid.clone(), job.id.clone(), "no-callback".into()));
@@ -613,9 +615,9 @@ impl PluginDispatch {
         addr: std::net::SocketAddr,
     ) -> Result<(), tonic::transport::Error> {
         use pb::{
-            agents_server, approval_server, audit_server, auth_server, events_server, http_server,
-            llm_server, memory_server, notify_server, routes_server, schedule_server,
-            sentinel_server, storage_server, tools_server, ui_server,
+            agents_server, approval_server, audit_server, auth_server, conversations_server,
+            events_server, http_server, llm_server, memory_server, notify_server, routes_server,
+            schedule_server, sentinel_server, storage_server, tools_server, ui_server,
         };
         let svc = PluginHostGrpc { dispatch: self };
         tonic::transport::Server::builder()
@@ -634,6 +636,7 @@ impl PluginDispatch {
             .add_service(notify_server::NotifyServer::new(svc.clone()))
             .add_service(audit_server::AuditServer::new(svc.clone()))
             .add_service(auth_server::AuthServer::new(svc.clone()))
+            .add_service(conversations_server::ConversationsServer::new(svc.clone()))
             .serve(addr)
             .await
     }
@@ -650,9 +653,9 @@ struct PluginHostGrpc {
 
 use pb::*;
 use pb::{
-    agents_server, approval_server, audit_server, auth_server, events_server, http_server,
-    llm_server, memory_server, notify_server, routes_server, schedule_server, sentinel_server,
-    storage_server, tools_server, ui_server,
+    agents_server, approval_server, audit_server, auth_server, conversations_server, events_server,
+    http_server, llm_server, memory_server, notify_server, routes_server, schedule_server,
+    sentinel_server, storage_server, tools_server, ui_server,
 };
 
 macro_rules! ident {
@@ -692,8 +695,7 @@ impl http_server::Http for PluginHostGrpc {
             transfer_encoding_chunked: false,
         };
         let (resp, audit_id) = rt.host.http_audited(&proxy_req).await.map_err(|e| {
-            let code = tonic::Code::try_from(crate::plugin_host::status_for_proxy_error(&e).code())
-                .unwrap_or(tonic::Code::Unknown);
+            let code = tonic::Code::from(crate::plugin_host::status_for_proxy_error(&e).code());
             Status::new(code, e.to_string())
         })?;
         let body = if req.return_body {
@@ -1002,7 +1004,7 @@ impl memory_server::Memory for PluginHostGrpc {
         let classes: Vec<SvcDataClass> = req
             .data_classes
             .iter()
-            .filter_map(|c| svc_data_class(*c as i32))
+            .filter_map(|c| svc_data_class(*c))
             .collect();
         let mem = MemoryService::new(&rt.host.storage, rt.host.data_classes.iter().copied());
         let value = String::from_utf8_lossy(&payload_to_bytes(req.content.as_ref())).to_string();
@@ -1065,7 +1067,7 @@ impl memory_server::Memory for PluginHostGrpc {
         } else {
             req.limit as usize
         };
-        let records = mem_prefix_scan(&rt.host.storage, &req.query, limit)?;
+        let records = mem_prefix_scan(&rt.host.storage, &req.query, limit).map_err(|e| *e)?;
         Ok(Response::new(MemoryQueryResponse { records }))
     }
 }
@@ -1075,10 +1077,10 @@ fn mem_prefix_scan(
     storage: &crate::plugin_storage::PluginStorage,
     prefix: &str,
     limit: usize,
-) -> Result<Vec<MemoryRecord>, Status> {
+) -> Result<Vec<MemoryRecord>, Box<Status>> {
     let entries = storage
         .state_prefix_scan(&format!("mem:{prefix}"), limit)
-        .map_err(storage_err)?;
+        .map_err(|e| Box::new(storage_err(e)))?;
     let mut out = Vec::new();
     for (_key, blob) in entries {
         if let Ok(entry) = serde_json::from_str::<crate::plugin_services::MemoryEntry>(&blob) {
@@ -1560,7 +1562,7 @@ impl llm_server::Llm for PluginHostGrpc {
         // the manifest's declared set (union rule — plugin can't widen).
         let allowed = &rt.host.data_classes;
         for c in &req.data_classes {
-            if let Some(sc) = svc_data_class(*c as i32) {
+            if let Some(sc) = svc_data_class(*c) {
                 if !allowed.contains(&sc) {
                     return Err(Status::permission_denied(format!(
                         "data class {} not declared by plugin",
@@ -1875,10 +1877,7 @@ impl auth_server::Auth for PluginHostGrpc {
             .await
             .map_err(|e| {
                 Status::new(
-                    tonic::Code::try_from(
-                        crate::plugin_host::PluginStatus::PermissionDenied.code(),
-                    )
-                    .unwrap_or(tonic::Code::Unknown),
+                    tonic::Code::from(crate::plugin_host::PluginStatus::PermissionDenied.code()),
                     e.to_string(),
                 )
             })?;
@@ -1888,5 +1887,38 @@ impl auth_server::Auth for PluginHostGrpc {
             granted_scopes: grant.scopes,
             token_type: grant.token_type,
         }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// conversations — honest seam
+// ---------------------------------------------------------------------------
+//
+// The proto contract carries `Conversations.Send`/`Stats`, but the dispatch
+// has no conversation-service handle yet (the ConversationService lives in
+// the API/kernel layer, not in PluginDispatch). Both RPCs therefore answer
+// UNIMPLEMENTED rather than pretending — plugin-side clients must surface
+// that as a refusal, which comms does via HostError::Refused. Wiring a real
+// sender is tracked as the remaining seam (needs a ConversationService
+// handle on PluginDispatch, injected by the API layer at boot).
+
+#[tonic::async_trait]
+impl conversations_server::Conversations for PluginHostGrpc {
+    async fn send(
+        &self,
+        _request: Request<ConversationSendRequest>,
+    ) -> Result<Response<ConversationSendResponse>, Status> {
+        Err(Status::unimplemented(
+            "conversations.send is not wired to a channel sender yet",
+        ))
+    }
+
+    async fn stats(
+        &self,
+        _request: Request<ConversationStatsRequest>,
+    ) -> Result<Response<ConversationStatsResponse>, Status> {
+        Err(Status::unimplemented(
+            "conversations.stats is not wired to the conversation service yet",
+        ))
     }
 }

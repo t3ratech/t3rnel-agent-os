@@ -426,6 +426,7 @@ mod tests {
                 plugin_id: "org.test.sharedvault".into(),
                 egress: vec![],
                 auth: vec![],
+                data_classes: vec![],
                 vault_key: Some(Zeroizing::new(key)),
                 dev_mode: false,
             },

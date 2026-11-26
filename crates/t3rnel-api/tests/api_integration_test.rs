@@ -113,6 +113,7 @@ async fn start_test_server_with_provider_and_audio(
         health_tracker: Arc::new(
             t3rnel_runtime::drivers::health_tracker::InMemoryHealthTracker::new(100),
         ),
+        plugin_dispatch: None,
     });
 
     let app = Router::new()
@@ -1159,6 +1160,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         health_tracker: Arc::new(
             t3rnel_runtime::drivers::health_tracker::InMemoryHealthTracker::new(100),
         ),
+        plugin_dispatch: None,
     });
 
     let api_key = state.kernel.config.api_key.trim().to_string();
