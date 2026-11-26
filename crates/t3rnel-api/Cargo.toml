@@ -6,6 +6,7 @@ license.workspace = true
 description = "HTTP/WebSocket API server for the T3rnel Agent OS daemon"
 
 [dependencies]
+zeroize = { workspace = true }
 t3rnel-types = { path = "../t3rnel-types" }
 t3rnel-kernel = { path = "../t3rnel-kernel" }
 t3rnel-runtime = { path = "../t3rnel-runtime" }

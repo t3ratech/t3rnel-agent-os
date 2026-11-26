@@ -558,7 +558,8 @@ async fn wa_business_verify(
 
 async fn wa_business_events(
     State(st): State<ConversationState>,
-    Json(payload): Json<serde_json::Value>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let Some(biz) = &st.whatsapp_business else {
         return Err((
@@ -569,10 +570,27 @@ async fn wa_business_events(
     if !biz.is_configured() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            "whatsapp-business credentials not connected — link the account first"
-                .to_string(),
+            "whatsapp-business credentials not connected — link the account first".to_string(),
         ));
     }
+    // X-Hub-Signature-256 (fail closed when an app secret is configured):
+    // Meta signs the raw body with the app secret; a missing/bad signature
+    // means the payload did not come from Meta.
+    let sig = headers
+        .get("x-hub-signature-256")
+        .and_then(|v| v.to_str().ok());
+    match biz.signature_valid(&body, sig) {
+        Some(true) => {}
+        Some(false) => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "X-Hub-Signature-256 verification failed".to_string(),
+            ))
+        }
+        None => {} // no app secret configured — verify-token remains the anchor
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid json".to_string()))?;
     let ingested = biz.ingest(&payload);
     Ok(Json(
         serde_json::json!({ "ok": true, "ingested": ingested }),
@@ -899,7 +917,10 @@ mod tests {
                 linked_at: chrono::Utc::now(),
             })
             .unwrap();
-        let vault = Arc::new(VaultBroker::open(home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME), false));
+        let vault = Arc::new(VaultBroker::open(
+            home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME),
+            false,
+        ));
         vault
             .unlock_ordered(Some(Zeroizing::new([4u8; 32])))
             .unwrap();
@@ -945,7 +966,12 @@ mod tests {
             // Connect the local adapter through the registry (vault attached).
             let creds = t3rnel_runtime::channels::BrokeredCreds::new(
                 Arc::new({
-                    let v = VaultBroker::open(self._home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME), false);
+                    let v = VaultBroker::open(
+                        self._home
+                            .path()
+                            .join(t3rnel_extensions::vault::VAULT_FILE_NAME),
+                        false,
+                    );
                     v.unlock_ordered(Some(Zeroizing::new([4u8; 32]))).unwrap();
                     v
                 }),

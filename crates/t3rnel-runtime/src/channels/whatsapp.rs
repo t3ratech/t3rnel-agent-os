@@ -616,6 +616,9 @@ struct BusinessInner {
     events: VecDeque<ConversationEvent>,
     access_token: Option<Zeroizing<String>>,
     verify_token: Option<Zeroizing<String>>,
+    /// Meta app secret for `X-Hub-Signature-256` verification. When set,
+    /// webhook POSTs without a valid signature are refused (fail closed).
+    app_secret: Option<Zeroizing<String>>,
     phone_number_id: Option<String>,
     /// LinkedAccount.account this session connected as.
     account: Option<String>,
@@ -644,6 +647,29 @@ impl BusinessWebhookState {
             }
             None => false,
         }
+    }
+
+    /// Verify an `X-Hub-Signature-256` header (`sha256=<hex hmac>`) over the
+    /// raw request body using the configured app secret. Returns `None`
+    /// when no app secret is configured (caller decides policy); `Some(ok)`
+    /// otherwise — missing/malformed headers are `Some(false)`.
+    pub fn signature_valid(&self, raw_body: &[u8], header: Option<&str>) -> Option<bool> {
+        let inner = self.inner.lock().unwrap();
+        let secret = inner.app_secret.as_ref()?;
+        let presented = header?.strip_prefix("sha256=")?;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes()).ok()?;
+        mac.update(raw_body);
+        let expected = hex::encode(mac.finalize().into_bytes());
+        // Constant-time compare on equal-length hex strings.
+        let ok = expected.len() == presented.len()
+            && expected
+                .bytes()
+                .zip(presented.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0;
+        Some(ok)
     }
 
     /// True once `connect` has resolved the Cloud API credentials — the
@@ -859,6 +885,11 @@ impl ChannelAdapter for WhatsAppBusinessAdapter {
             Some(n) => Some(creds.resolve(n)?),
             None => None,
         };
+        // Optional `:app-secret` vault secret enables X-Hub-Signature-256
+        // verification on webhook POSTs. Absent → signature check skipped
+        // (verify-token handshake + loopback bind remain the anchors).
+        let app_secret =
+            Self::secret_suffix(&names, ":app-secret").and_then(|n| creds.resolve(n).ok());
         let pnid_name = Self::secret_suffix(&names, ":phone-number-id");
         let pnid_secret = match pnid_name {
             Some(n) => Some(creds.resolve(n)?),
@@ -879,6 +910,7 @@ impl ChannelAdapter for WhatsAppBusinessAdapter {
             let mut inner = self.state.inner.lock().unwrap();
             inner.access_token = Some(token);
             inner.verify_token = verify;
+            inner.app_secret = app_secret;
             inner.phone_number_id = Some(phone_number_id);
             inner.account = Some(creds.account().to_string());
         }

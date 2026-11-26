@@ -102,12 +102,12 @@ Both fixes are **uncommitted** in their respective repos (public repo + private 
 
 | Blocker | Status |
 |---|---|
-| gRPC/tonic dispatch for the 14 host services + PluginCallbacks | proto written (`proto/t3rnel/plugin/v1/plugin.proto`); `buf`/`protoc` missing → `NEEDS-FROM-TOOLS.md`; no manifest→`PluginHostConfig` wiring exists yet (verified: no production constructor of `EgressRule`/`AuthBinding`/`PluginHost` outside tests) |
-| OAuth consent flow → `store_grant` | consent templates exist in `t3rnel-extensions`; the path that writes `oauth:<provider>` grants into the vault is not wired to `ScopedTokenService::store_grant` in production code |
+| gRPC/tonic dispatch for the 14 host services + PluginCallbacks | **LANDED (uncommitted, session 13)**: `plugin_grpc.rs` + `build.rs` (tonic-build via protoc-bin-vendored) implement all 14 host services + PluginCallbacks client cache; manifest→`PluginHostConfig` wiring via signed `permissions` block; daemon serves on `plugin_grpc_addr` (default 127.0.0.1:50061). LIVE daemon↔plugin-binary smoke still pending |
+| OAuth consent flow → `store_grant` | **WIRED (uncommitted)**: `begin_pkce_flow`/`exchange_code`/`finish_pkce_flow` split in `t3rnel-extensions/src/oauth.rs`; `POST /api/plugins/oauth/{start,complete}` + `GET /status` in `plugin_admin.rs` persist via `ScopedTokenService::store_grant`. Mock-provider live test pending |
 | TUF release trust (§14.11) | throwaway proof key only; no key custody/transparency-log work |
-| Agent-message dispatch consumer | `AgentsService::request` audits only; no consumer dispatches to real agents |
-| WhatsApp media download endpoint | inbound media is placeholder text + message-id handle; gateway has no media fetch |
-| Business webhook `X-Hub-Signature-256` | not implemented — verify-token handshake + loopback bind are current trust anchors; required before public exposure |
+| Agent-message dispatch consumer | **WIRED (uncommitted)**: server.rs inbound loop dispatches `RoutedInbound::AgentMessage{agent_id}` to `send_message_with_handle_and_blocks` and returns the reply via `ConversationService::send_message` |
+| WhatsApp media download endpoint | **STILL OPEN** — gateway `GET /media/:id` + adapter attachment resolution not implemented |
+| Business webhook `X-Hub-Signature-256` | **PARTIAL (uncommitted)**: `BusinessWebhookState::signature_valid` + `:app-secret` vault secret + fail-closed check in `wa_business_events` when configured; app-secret provisioning UX still open |
 | WhatsApp double-processing | gateway still forwards to agents directly AND adapter emits ConversationEvents — legacy path must be gated/retired |
 | `t3rnel plugin` CLI + inotify dev watcher | requested in `CLI-WIRING-REQUESTS.md` (owner-reserved `t3rnel-cli`) |
 | audit findings F1, F2 | recommended fixes before scale-out (§3) |

@@ -60,8 +60,7 @@ fn resolve_oauth_access(
     let raw = broker
         .resolve(&format!("oauth:{provider}"))
         .map_err(|_| unavailable())?;
-    let grant: StoredGrant =
-        serde_json::from_str(raw.as_str()).map_err(|_| unavailable())?;
+    let grant: StoredGrant = serde_json::from_str(raw.as_str()).map_err(|_| unavailable())?;
     if let Some(exp) = grant.expires_at {
         if exp - OAUTH_ACCESS_SKEW_SECS <= chrono::Utc::now().timestamp() {
             return Err(unavailable());
@@ -147,7 +146,10 @@ impl VaultBroker {
         // 2. The OS keyring: where the master key lives in normal use. Skipped when
         //    T3RNEL_VAULT_KEY is set, because the vault would then read that variable
         //    instead, and the variable is development-only (handled below).
-        if vault.exists() && std::env::var_os("T3RNEL_VAULT_KEY").is_none() && vault.unlock().is_ok() {
+        if vault.exists()
+            && std::env::var_os("T3RNEL_VAULT_KEY").is_none()
+            && vault.unlock().is_ok()
+        {
             return Ok(UnlockSource::Keyring);
         }
         // 3. Dev-only env key.
@@ -350,9 +352,7 @@ mod tests {
             refresh_token: Some("1//refresh".into()),
             expires_at: expires_in_secs
                 .map(|s| (chrono::Utc::now() + chrono::Duration::seconds(s)).timestamp()),
-            scopes: vec![
-                "https://www.googleapis.com/auth/webmasters.readonly".into(),
-            ],
+            scopes: vec!["https://www.googleapis.com/auth/webmasters.readonly".into()],
             token_endpoint: Some("https://oauth2.googleapis.com/token".into()),
             client_id: Some("cid".into()),
             client_secret: None,
@@ -414,7 +414,10 @@ mod tests {
             );
             kernel_vault.init_with_key(Zeroizing::new(key)).unwrap();
             kernel_vault
-                .set("exchange-key".into(), Zeroizing::new("pasted-by-the-user".into()))
+                .set(
+                    "exchange-key".into(),
+                    Zeroizing::new("pasted-by-the-user".into()),
+                )
                 .unwrap();
         }
         let host = PluginHost::open(
@@ -429,8 +432,14 @@ mod tests {
         )
         .unwrap();
         // With the old file name this opened a second, empty vault and found nothing.
-        assert_eq!(host.vault.resolve("exchange-key").unwrap().as_str(), "pasted-by-the-user");
-        assert!(!home.path().join("vault.t3rnel").exists(), "no second vault file may be created");
+        assert_eq!(
+            host.vault.resolve("exchange-key").unwrap().as_str(),
+            "pasted-by-the-user"
+        );
+        assert!(
+            !home.path().join("vault.t3rnel").exists(),
+            "no second vault file may be created"
+        );
     }
 
     #[test]
@@ -438,7 +447,10 @@ mod tests {
         let (_d, path) = scratch_vault();
         std::env::remove_var("T3RNEL_VAULT_KEY");
         let broker = VaultBroker::open(path.clone(), false);
-        assert!(matches!(broker.unlock_ordered(None), Err(BrokerError::Locked)));
+        assert!(matches!(
+            broker.unlock_ordered(None),
+            Err(BrokerError::Locked)
+        ));
         assert!(!path.exists());
     }
 }

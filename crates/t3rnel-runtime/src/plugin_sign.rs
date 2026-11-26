@@ -370,6 +370,39 @@ fn lite_from_v1(m: &t3rnel_bridge::manifest::Manifest) -> PluginManifestLite {
         permissions_summary: lines,
         entitlement_account: None,
         files: Default::default(),
+        // Carry the signed permission detail the dispatch layer turns into
+        // the plugin's PluginHostConfig — inside the signed manifest bytes.
+        permissions: Some(crate::plugin_lifecycle::SignedPermissions {
+            network_hosts: m.permissions.network.hosts.clone(),
+            encoded_slash_hosts: m.permissions.network.encoded_slash.clone(),
+            auth: m
+                .permissions
+                .auth
+                .iter()
+                .map(|r| {
+                    let scheme = match r.scheme {
+                        t3rnel_bridge::manifest::AuthScheme::Bearer => "bearer",
+                        t3rnel_bridge::manifest::AuthScheme::Header => "header",
+                        t3rnel_bridge::manifest::AuthScheme::Basic => "basic",
+                        t3rnel_bridge::manifest::AuthScheme::QueryKey => "query-key",
+                        t3rnel_bridge::manifest::AuthScheme::HmacSha256 => "hmac-sha256",
+                    };
+                    crate::plugin_lifecycle::SignedAuthRule {
+                        secret: r.secret.clone(),
+                        scheme: scheme.to_string(),
+                        hosts: r.hosts.clone(),
+                        methods: r.methods.clone(),
+                        paths: r.paths.clone(),
+                    }
+                })
+                .collect(),
+            data_classes: m
+                .permissions
+                .data_classes
+                .iter()
+                .map(|c| c.to_string())
+                .collect(),
+        }),
     }
 }
 
@@ -464,6 +497,25 @@ pub fn build_package(src: &Path, dst: &Path) -> Result<PluginManifestLite, SignE
             permissions_summary: permissions_summary(src_manifest),
             entitlement_account: None,
             files: Default::default(),
+            // The lite package schema declares auth bindings and data
+            // classes but no network hosts — egress stays empty (deny).
+            permissions: Some(crate::plugin_lifecycle::SignedPermissions {
+                network_hosts: Vec::new(),
+                encoded_slash_hosts: Vec::new(),
+                auth: src_manifest
+                    .permissions
+                    .auth
+                    .iter()
+                    .map(|r| crate::plugin_lifecycle::SignedAuthRule {
+                        secret: r.secret.clone(),
+                        scheme: r.scheme.clone(),
+                        hosts: r.hosts.clone(),
+                        methods: r.methods.clone(),
+                        paths: r.paths.clone(),
+                    })
+                    .collect(),
+                data_classes: src_manifest.permissions.data_classes.clone(),
+            }),
         },
         // `Manifest::parse` already ran full v1 validation (capabilities,
         // auth scoping, data classes, requires, security flags).

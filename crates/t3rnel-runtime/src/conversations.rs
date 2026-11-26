@@ -20,7 +20,7 @@
 //! approval — approval replies are the ONLY text this service acts on, and
 //! they still pass policy re-validation.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -696,7 +696,10 @@ impl ConversationService {
         let upper = text.trim().to_ascii_uppercase();
         let mut parts = upper.split_whitespace();
         let first = parts.next()?;
-        let rest = parts.next().map(|s| s.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-').to_string());
+        let rest = parts.next().map(|s| {
+            s.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .to_string()
+        });
         // A reply is the verdict word, optionally followed by one approval id: nothing else.
         // "yes but only if..." or "ok thanks" is conversation, not consent; and a bare
         // "ok" is far too common a word to authorise a payment.
@@ -1377,7 +1380,10 @@ mod tests {
                 linked_at: Utc::now(),
             })
             .unwrap();
-        let vault = Arc::new(VaultBroker::open(home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME), false));
+        let vault = Arc::new(VaultBroker::open(
+            home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME),
+            false,
+        ));
         vault
             .unlock_ordered(Some(Zeroizing::new([3u8; 32])))
             .unwrap();
@@ -1718,10 +1724,22 @@ mod tests {
 
     #[test]
     fn reply_parser_covers_yes_no_defer_and_ids() {
-        assert_eq!(ConversationService::parse_reply("YES"), Some((ApprovalVerdict::Approve, None)));
-        assert_eq!(ConversationService::parse_reply("yes."), Some((ApprovalVerdict::Approve, None)));
-        assert_eq!(ConversationService::parse_reply("no ab-000007"), Some((ApprovalVerdict::Deny, Some("AB-000007".into()))));
-        assert_eq!(ConversationService::parse_reply("Defer"), Some((ApprovalVerdict::Defer, None)));
+        assert_eq!(
+            ConversationService::parse_reply("YES"),
+            Some((ApprovalVerdict::Approve, None))
+        );
+        assert_eq!(
+            ConversationService::parse_reply("yes."),
+            Some((ApprovalVerdict::Approve, None))
+        );
+        assert_eq!(
+            ConversationService::parse_reply("no ab-000007"),
+            Some((ApprovalVerdict::Deny, Some("AB-000007".into())))
+        );
+        assert_eq!(
+            ConversationService::parse_reply("Defer"),
+            Some((ApprovalVerdict::Defer, None))
+        );
         assert_eq!(ConversationService::parse_reply("maybe later?"), None);
         assert_eq!(ConversationService::parse_reply(""), None);
     }
@@ -1729,8 +1747,22 @@ mod tests {
     #[test]
     fn casual_replies_are_not_consent() {
         // These all began with an approving first word and so approved a pending payment.
-        for text in ["ok", "OK", "ok thanks", "yes but only if it is under $5", "yes please do it now", "sure", "yep", "approve it later maybe", "k"] {
-            assert_eq!(ConversationService::parse_reply(text), None, "{text:?} must not decide an approval");
+        for text in [
+            "ok",
+            "OK",
+            "ok thanks",
+            "yes but only if it is under $5",
+            "yes please do it now",
+            "sure",
+            "yep",
+            "approve it later maybe",
+            "k",
+        ] {
+            assert_eq!(
+                ConversationService::parse_reply(text),
+                None,
+                "{text:?} must not decide an approval"
+            );
         }
     }
 
@@ -1774,7 +1806,12 @@ mod tests {
     #[tokio::test]
     async fn another_member_of_a_group_thread_cannot_answer_for_the_person_asked() {
         let f = fixture();
-        f.service.registry().connect_all().await.into_iter().for_each(|(_, r)| r.unwrap());
+        f.service
+            .registry()
+            .connect_all()
+            .await
+            .into_iter()
+            .for_each(|(_, r)| r.unwrap());
         // The owner talks in a shared thread first, so the thread exists.
         let mut hello = inbound("hello");
         hello.thread_key = "group-1".into();
@@ -1782,7 +1819,17 @@ mod tests {
         let pref = f.approvals.add("pay.send", "pay 500 to supplier");
         let binding = f
             .service
-            .deliver_approval("local:web", "web", "+1555", "group-1", "pay.send", "pay 500 to supplier", "high", Some(pref.clone()), None)
+            .deliver_approval(
+                "local:web",
+                "web",
+                "+1555",
+                "group-1",
+                "pay.send",
+                "pay 500 to supplier",
+                "high",
+                Some(pref.clone()),
+                None,
+            )
             .await
             .unwrap();
         // Someone else in the same thread says YES. Before the fix this approved the payment.
@@ -1790,30 +1837,66 @@ mod tests {
         intruder.sender = "+1999".into();
         intruder.thread_key = "group-1".into();
         let routed = f.service.handle_inbound(intruder).await.unwrap();
-        assert!(matches!(routed, RoutedInbound::AgentMessage { .. }), "a non-addressee reply is ordinary chat: {routed:?}");
-        assert_eq!(f.service.binding(&binding.id).unwrap().state, BindingState::Pending);
-        assert_eq!(f.approvals.lookup(&pref).await.unwrap().unwrap().state, "pending");
+        assert!(
+            matches!(routed, RoutedInbound::AgentMessage { .. }),
+            "a non-addressee reply is ordinary chat: {routed:?}"
+        );
+        assert_eq!(
+            f.service.binding(&binding.id).unwrap().state,
+            BindingState::Pending
+        );
+        assert_eq!(
+            f.approvals.lookup(&pref).await.unwrap().unwrap().state,
+            "pending"
+        );
         // The person who was asked can still answer.
         let mut owner = inbound("YES");
         owner.thread_key = "group-1".into();
-        assert!(matches!(f.service.handle_inbound(owner).await.unwrap(), RoutedInbound::ApprovalDecided { .. }));
+        assert!(matches!(
+            f.service.handle_inbound(owner).await.unwrap(),
+            RoutedInbound::ApprovalDecided { .. }
+        ));
     }
 
     #[tokio::test]
     async fn two_simultaneous_replies_decide_a_binding_once() {
         let f = fixture();
-        f.service.registry().connect_all().await.into_iter().for_each(|(_, r)| r.unwrap());
+        f.service
+            .registry()
+            .connect_all()
+            .await
+            .into_iter()
+            .for_each(|(_, r)| r.unwrap());
         let pref = f.approvals.add("pay.send", "pay 5");
         let binding = f
             .service
-            .deliver_approval("local:web", "web", "+1555", "+1555", "pay.send", "pay 5", "high", Some(pref), None)
+            .deliver_approval(
+                "local:web",
+                "web",
+                "+1555",
+                "+1555",
+                "pay.send",
+                "pay 5",
+                "high",
+                Some(pref),
+                None,
+            )
             .await
             .unwrap();
         let (a, b) = tokio::join!(
-            f.service.resolve_binding(&binding.id, ApprovalVerdict::Approve, "reply-1", None),
-            f.service.resolve_binding(&binding.id, ApprovalVerdict::Approve, "reply-2", None),
+            f.service
+                .resolve_binding(&binding.id, ApprovalVerdict::Approve, "reply-1", None),
+            f.service
+                .resolve_binding(&binding.id, ApprovalVerdict::Approve, "reply-2", None),
         );
-        assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1, "exactly one decision: {a:?} / {b:?}");
-        assert_eq!(f.service.binding(&binding.id).unwrap().state, BindingState::Approved);
+        assert_eq!(
+            [a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(),
+            1,
+            "exactly one decision: {a:?} / {b:?}"
+        );
+        assert_eq!(
+            f.service.binding(&binding.id).unwrap().state,
+            BindingState::Approved
+        );
     }
 }

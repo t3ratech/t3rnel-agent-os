@@ -934,7 +934,10 @@ mod tests {
                 linked_at: Utc::now(),
             })
             .unwrap();
-        let vault = Arc::new(VaultBroker::open(home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME), false));
+        let vault = Arc::new(VaultBroker::open(
+            home.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME),
+            false,
+        ));
         vault
             .unlock_ordered(Some(Zeroizing::new([8u8; 32])))
             .unwrap();

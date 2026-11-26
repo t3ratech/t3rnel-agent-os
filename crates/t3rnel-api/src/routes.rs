@@ -56,6 +56,9 @@ pub struct AppState {
     pub ide_command_notify: Arc<tokio::sync::Notify>,
     /// Health tracker for LLM provider metrics and circuit breaker state.
     pub health_tracker: Arc<t3rnel_runtime::drivers::health_tracker::InMemoryHealthTracker>,
+    /// gRPC plugin dispatch (14 host services + PluginCallbacks client
+    /// cache). `None` when `plugin_grpc_addr` is empty/disabled.
+    pub plugin_dispatch: Option<Arc<t3rnel_runtime::plugin_grpc::PluginDispatch>>,
 }
 
 /// State of an IDE command session.
@@ -737,7 +740,7 @@ fn persist_strict_marker_comms_event(
 /// WhatsApp messages silently received no reply.
 ///
 /// A UUID is tried first so an agent named like an id cannot shadow one.
-fn resolve_agent_id(state: &AppState, id: &str) -> Option<AgentId> {
+pub(crate) fn resolve_agent_id(state: &AppState, id: &str) -> Option<AgentId> {
     if let Ok(parsed) = id.parse::<AgentId>() {
         if state.kernel.registry.get(parsed).is_some() {
             return Some(parsed);

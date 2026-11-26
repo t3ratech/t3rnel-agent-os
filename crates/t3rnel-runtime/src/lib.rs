@@ -48,6 +48,7 @@ pub mod model_catalog;
 pub mod nested_call;
 pub mod plugin_auth;
 pub mod plugin_dev;
+pub mod plugin_grpc;
 pub mod plugin_host;
 pub mod plugin_lifecycle;
 pub mod plugin_proxy;

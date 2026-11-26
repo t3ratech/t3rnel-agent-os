@@ -130,7 +130,10 @@ fn gw_event(seq: u64, text: &str) -> GatewayInboundEvent {
 }
 
 fn unlocked_vault(home: &std::path::Path) -> Arc<VaultBroker> {
-    let vault = Arc::new(VaultBroker::open(home.join(t3rnel_extensions::vault::VAULT_FILE_NAME), false));
+    let vault = Arc::new(VaultBroker::open(
+        home.join(t3rnel_extensions::vault::VAULT_FILE_NAME),
+        false,
+    ));
     vault
         .unlock_ordered(Some(Zeroizing::new([7u8; 32])))
         .unwrap();

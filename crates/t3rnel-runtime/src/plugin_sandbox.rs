@@ -78,7 +78,11 @@ impl SandboxPolicy {
                 .filter(|p| p.exists()),
         );
         SandboxPolicy {
-            read_write_dirs: if data.is_dir() { vec![data] } else { Vec::new() },
+            read_write_dirs: if data.is_dir() {
+                vec![data]
+            } else {
+                Vec::new()
+            },
             read_only_dirs,
             keep_fds: Vec::new(),
         }
@@ -201,7 +205,11 @@ pub fn confined_command<'a>(
 #[cfg(target_os = "linux")]
 fn close_inherited_fds(keep: &[i32]) -> Result<(), SandboxError> {
     const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
-    let mut keep: Vec<u32> = keep.iter().filter(|fd| **fd > 2).map(|fd| *fd as u32).collect();
+    let mut keep: Vec<u32> = keep
+        .iter()
+        .filter(|fd| **fd > 2)
+        .map(|fd| *fd as u32)
+        .collect();
     keep.sort_unstable();
     keep.dedup();
     let mut ranges: Vec<(u32, u32)> = Vec::new();
@@ -221,7 +229,10 @@ fn close_inherited_fds(keep: &[i32]) -> Result<(), SandboxError> {
         }
         // Older kernels: set the flag one descriptor at a time.
         let limit = {
-            let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            let mut rl = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
             // SAFETY: getrlimit writes into a valid struct.
             if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } == 0 {
                 rl.rlim_cur.min(1 << 20) as u32
@@ -446,7 +457,11 @@ mod landlock {
         let is_dir = unsafe { libc::fstat(dfd, &mut st) } == 0
             && (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
         let attr = PathBeneathAttr {
-            allowed_access: if is_dir { access } else { access & ACCESS_FS_FILE_RIGHTS },
+            allowed_access: if is_dir {
+                access
+            } else {
+                access & ACCESS_FS_FILE_RIGHTS
+            },
             parent_fd: dfd,
         };
         let rc = syscall3(
@@ -568,8 +583,14 @@ const DENY_ENOSYS: &[(u32, &str)] = &[(435, "clone3")];
 const SYS_CLONE: u32 = 56;
 /// CLONE_NEWNS | NEWCGROUP | NEWUTS | NEWIPC | NEWUSER | NEWPID | NEWNET | NEWTIME
 #[cfg(target_os = "linux")]
-const CLONE_NAMESPACE_FLAGS: u32 =
-    0x0002_0000 | 0x0200_0000 | 0x0400_0000 | 0x0800_0000 | 0x1000_0000 | 0x2000_0000 | 0x4000_0000 | 0x0000_0080;
+const CLONE_NAMESPACE_FLAGS: u32 = 0x0002_0000
+    | 0x0200_0000
+    | 0x0400_0000
+    | 0x0800_0000
+    | 0x1000_0000
+    | 0x2000_0000
+    | 0x4000_0000
+    | 0x0000_0080;
 
 /// The x32 ABI shares `AUDIT_ARCH_X86_64` and marks its syscall numbers with
 /// this bit. A filter that only compares numbers would let `socket` through
@@ -629,7 +650,12 @@ fn build_seccomp_program() -> Vec<SockFilter> {
     steps.push(Step::Load(OFFSET_ARG0));
     steps.push(Step::JsetTo(CLONE_NAMESPACE_FLAGS, Verdict::Eperm));
     // The four verdicts, in fixed order at the end.
-    let rets = [Verdict::Allow, Verdict::Eperm, Verdict::Enosys, Verdict::Kill];
+    let rets = [
+        Verdict::Allow,
+        Verdict::Eperm,
+        Verdict::Enosys,
+        Verdict::Kill,
+    ];
     for v in rets {
         steps.push(Step::Ret(v));
     }
@@ -644,15 +670,60 @@ fn build_seccomp_program() -> Vec<SockFilter> {
             u8::try_from(off).expect("seccomp jump offset exceeds 255")
         };
         prog.push(match *step {
-            Step::Load(k) => SockFilter { code: BPF_LD_W_ABS, jt: 0, jf: 0, k },
-            Step::JeqTo(k, v) => SockFilter { code: BPF_JMP_JEQ_K, jt: to(v), jf: 0, k },
-            Step::JsetTo(k, v) => SockFilter { code: BPF_JMP_JSET_K, jt: to(v), jf: 0, k },
-            Step::JeqThenSkip(k, n) => SockFilter { code: BPF_JMP_JEQ_K, jt: n, jf: 0, k },
-            Step::JeqElseSkip(k, n) => SockFilter { code: BPF_JMP_JEQ_K, jt: 0, jf: n, k },
-            Step::Ret(Verdict::Allow) => SockFilter { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW },
-            Step::Ret(Verdict::Eperm) => SockFilter { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ERRNO | 1 },
-            Step::Ret(Verdict::Enosys) => SockFilter { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ERRNO | 38 },
-            Step::Ret(Verdict::Kill) => SockFilter { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_KILL_PROCESS },
+            Step::Load(k) => SockFilter {
+                code: BPF_LD_W_ABS,
+                jt: 0,
+                jf: 0,
+                k,
+            },
+            Step::JeqTo(k, v) => SockFilter {
+                code: BPF_JMP_JEQ_K,
+                jt: to(v),
+                jf: 0,
+                k,
+            },
+            Step::JsetTo(k, v) => SockFilter {
+                code: BPF_JMP_JSET_K,
+                jt: to(v),
+                jf: 0,
+                k,
+            },
+            Step::JeqThenSkip(k, n) => SockFilter {
+                code: BPF_JMP_JEQ_K,
+                jt: n,
+                jf: 0,
+                k,
+            },
+            Step::JeqElseSkip(k, n) => SockFilter {
+                code: BPF_JMP_JEQ_K,
+                jt: 0,
+                jf: n,
+                k,
+            },
+            Step::Ret(Verdict::Allow) => SockFilter {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ALLOW,
+            },
+            Step::Ret(Verdict::Eperm) => SockFilter {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ERRNO | 1,
+            },
+            Step::Ret(Verdict::Enosys) => SockFilter {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ERRNO | 38,
+            },
+            Step::Ret(Verdict::Kill) => SockFilter {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_KILL_PROCESS,
+            },
         });
     }
     prog
@@ -879,11 +950,27 @@ mod tests {
     #[test]
     fn every_listed_syscall_is_refused_with_eperm() {
         for (nr, name) in DENY_EPERM {
-            assert_eq!(verdict(AUDIT_ARCH_X86_64, *nr, 0), RET_EPERM, "{name} ({nr})");
+            assert_eq!(
+                verdict(AUDIT_ARCH_X86_64, *nr, 0),
+                RET_EPERM,
+                "{name} ({nr})"
+            );
         }
         // The escape routes the design depends on, spelled out so a deleted entry fails here.
-        for needed in ["socket", "io_uring_setup", "process_vm_readv", "pidfd_getfd", "ptrace", "keyctl", "unshare", "mount"] {
-            assert!(DENY_EPERM.iter().any(|(_, n)| *n == needed), "{needed} missing from the deny-list");
+        for needed in [
+            "socket",
+            "io_uring_setup",
+            "process_vm_readv",
+            "pidfd_getfd",
+            "ptrace",
+            "keyctl",
+            "unshare",
+            "mount",
+        ] {
+            assert!(
+                DENY_EPERM.iter().any(|(_, n)| *n == needed),
+                "{needed} missing from the deny-list"
+            );
         }
     }
 
@@ -903,7 +990,11 @@ mod tests {
 
     #[test]
     fn a_foreign_architecture_is_killed() {
-        for arch in [0x4000_0003u32 /* i386 */, 0xC000_00B7 /* aarch64 */, 0] {
+        for arch in [
+            0x4000_0003u32, /* i386 */
+            0xC000_00B7,    /* aarch64 */
+            0,
+        ] {
             assert_eq!(verdict(arch, 41, 0), RET_KILL, "arch {arch:#x}");
             assert_eq!(verdict(arch, 0, 0), RET_KILL, "arch {arch:#x}");
         }
@@ -914,23 +1005,55 @@ mod tests {
         // read write open close mmap mprotect munmap brk ioctl openat futex epoll_wait epoll_ctl
         // nanosleep clock_gettime getrandom execve exit_group sendmsg recvmsg socketpair
         // connect on an inherited stream, sendto/recvfrom, pipe2, dup3, fcntl, getpid
-        for nr in [0u32, 1, 2, 3, 9, 10, 11, 12, 16, 257, 202, 232, 233, 35, 228, 318, 59, 231, 46, 47, 53, 42, 44, 45, 293, 292, 72, 39] {
+        for nr in [
+            0u32, 1, 2, 3, 9, 10, 11, 12, 16, 257, 202, 232, 233, 35, 228, 318, 59, 231, 46, 47,
+            53, 42, 44, 45, 293, 292, 72, 39,
+        ] {
             assert_eq!(verdict(AUDIT_ARCH_X86_64, nr, 0), RET_ALLOW, "syscall {nr}");
         }
     }
 
     #[test]
     fn clone_may_make_threads_but_never_a_new_namespace() {
-        const THREAD_FLAGS: u32 = 0x0000_0100 | 0x0000_0200 | 0x0000_0400 | 0x0000_0800 | 0x0001_0000 | 0x0004_0000 | 0x0010_0000 | 0x0020_0000;
-        assert_eq!(verdict(AUDIT_ARCH_X86_64, SYS_CLONE, THREAD_FLAGS), RET_ALLOW, "pthread_create");
-        assert_eq!(verdict(AUDIT_ARCH_X86_64, SYS_CLONE, 17 /* fork: SIGCHLD */), RET_ALLOW, "fork");
+        const THREAD_FLAGS: u32 = 0x0000_0100
+            | 0x0000_0200
+            | 0x0000_0400
+            | 0x0000_0800
+            | 0x0001_0000
+            | 0x0004_0000
+            | 0x0010_0000
+            | 0x0020_0000;
+        assert_eq!(
+            verdict(AUDIT_ARCH_X86_64, SYS_CLONE, THREAD_FLAGS),
+            RET_ALLOW,
+            "pthread_create"
+        );
+        assert_eq!(
+            verdict(AUDIT_ARCH_X86_64, SYS_CLONE, 17 /* fork: SIGCHLD */),
+            RET_ALLOW,
+            "fork"
+        );
         for (flag, name) in [
-            (0x0002_0000u32, "NEWNS"), (0x0200_0000, "NEWCGROUP"), (0x0400_0000, "NEWUTS"), (0x0800_0000, "NEWIPC"),
-            (0x1000_0000, "NEWUSER"), (0x2000_0000, "NEWPID"), (0x4000_0000, "NEWNET"), (0x0000_0080, "NEWTIME"),
+            (0x0002_0000u32, "NEWNS"),
+            (0x0200_0000, "NEWCGROUP"),
+            (0x0400_0000, "NEWUTS"),
+            (0x0800_0000, "NEWIPC"),
+            (0x1000_0000, "NEWUSER"),
+            (0x2000_0000, "NEWPID"),
+            (0x4000_0000, "NEWNET"),
+            (0x0000_0080, "NEWTIME"),
         ] {
-            assert_eq!(verdict(AUDIT_ARCH_X86_64, SYS_CLONE, THREAD_FLAGS | flag), RET_EPERM, "clone {name}");
+            assert_eq!(
+                verdict(AUDIT_ARCH_X86_64, SYS_CLONE, THREAD_FLAGS | flag),
+                RET_EPERM,
+                "clone {name}"
+            );
         }
-        assert_eq!(verdict(AUDIT_ARCH_X86_64, 435, 0), RET_ENOSYS, "clone3 falls back to clone");
+        assert_eq!(
+            verdict(AUDIT_ARCH_X86_64, 435, 0),
+            RET_ENOSYS,
+            "clone3 falls back to clone"
+        );
     }
 
     #[test]
@@ -940,7 +1063,11 @@ mod tests {
         assert_eq!(prog.last().unwrap().code, 0x06, "ends in a return");
         for (i, insn) in prog.iter().enumerate() {
             if insn.code == 0x15 || insn.code == 0x45 {
-                assert!(i + 1 + insn.jt as usize <= prog.len() - 1 && i + 1 + insn.jf as usize <= prog.len() - 1, "jump {i} leaves the program");
+                assert!(
+                    i + 1 + insn.jt as usize <= prog.len() - 1
+                        && i + 1 + insn.jf as usize <= prog.len() - 1,
+                    "jump {i} leaves the program"
+                );
             }
         }
     }
@@ -961,7 +1088,10 @@ mod tests {
     #[test]
     fn a_confined_process_cannot_truncate_a_file_outside_its_grant() {
         let abi = landlock::abi_version().unwrap();
-        assert!(abi >= 3, "Landlock ABI {abi}: this kernel cannot restrict truncate(2) (needs Linux 6.2)");
+        assert!(
+            abi >= 3,
+            "Landlock ABI {abi}: this kernel cannot restrict truncate(2) (needs Linux 6.2)"
+        );
         let granted = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let victim = outside.path().join("victim.txt");
@@ -972,14 +1102,33 @@ mod tests {
             ..Default::default()
         };
         // os.truncate() is truncate(2): it needs no write-open, which ABI 1 does not control.
-        let out = run_confined(&policy, &[&format!("python3 -c \"import os; os.truncate('{}', 0)\"", victim.display())]);
-        assert!(!out.status.success(), "truncate outside the grant must fail: {out:?}");
+        let out = run_confined(
+            &policy,
+            &[&format!(
+                "python3 -c \"import os; os.truncate('{}', 0)\"",
+                victim.display()
+            )],
+        );
+        assert!(
+            !out.status.success(),
+            "truncate outside the grant must fail: {out:?}"
+        );
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "important");
         // Inside the grant it still works.
         let own = granted.path().join("own.txt");
         std::fs::write(&own, "mine").unwrap();
-        let out = run_confined(&policy, &[&format!("python3 -c \"import os; os.truncate('{}', 0)\"", own.display())]);
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let out = run_confined(
+            &policy,
+            &[&format!(
+                "python3 -c \"import os; os.truncate('{}', 0)\"",
+                own.display()
+            )],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert_eq!(std::fs::read_to_string(&own).unwrap(), "");
     }
 
@@ -993,7 +1142,11 @@ mod tests {
         };
         let script = "python3 -c \"import ctypes; l=ctypes.CDLL(None,use_errno=True); r=l.syscall(310,1,0,0,0,0,0); print(r, ctypes.get_errno())\"";
         let out = run_confined(&policy, &[script]);
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "-1 1", "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "-1 1",
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -1006,7 +1159,11 @@ mod tests {
         };
         let script = "python3 -c \"import ctypes; l=ctypes.CDLL(None,use_errno=True); r=l.ptrace(0,0,0,0); print(r, ctypes.get_errno())\"";
         let out = run_confined(&policy, &[script]);
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "-1 1", "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "-1 1",
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -1029,13 +1186,27 @@ mod tests {
             keep_fds: vec![],
         };
         let out = run_confined(&closed, &[&format!("echo leaked >&{w}")]);
-        assert!(!out.status.success(), "descriptor {w} must not exist in the child: {out:?}");
+        assert!(
+            !out.status.success(),
+            "descriptor {w} must not exist in the child: {out:?}"
+        );
 
-        let kept = SandboxPolicy { keep_fds: vec![w], ..closed };
+        let kept = SandboxPolicy {
+            keep_fds: vec![w],
+            ..closed
+        };
         let out = run_confined(&kept, &[&format!("echo delivered >&{w}")]);
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         unsafe { libc::close(w) };
-        assert_eq!(read_all(r).trim(), "delivered", "only the kept descriptor carried data");
+        assert_eq!(
+            read_all(r).trim(),
+            "delivered",
+            "only the kept descriptor carried data"
+        );
         unsafe { libc::close(r) };
     }
 
@@ -1048,21 +1219,41 @@ mod tests {
 
         // A dynamically linked shell starts, so system libraries are reachable.
         let out = run_confined(&policy, &["echo started"]);
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "started", "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "started",
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         // data/ is writable.
-        let out = run_confined(&policy, &[&format!("echo ok > {}/data/state.txt", plugin.path().display())]);
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let out = run_confined(
+            &policy,
+            &[&format!(
+                "echo ok > {}/data/state.txt",
+                plugin.path().display()
+            )],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         // The plugin cannot rewrite its own manifest or drop in a new binary.
         for target in ["manifest.json", "plugin", "evil"] {
-            let out = run_confined(&policy, &[&format!("echo x > {}/{target}", plugin.path().display())]);
+            let out = run_confined(
+                &policy,
+                &[&format!("echo x > {}/{target}", plugin.path().display())],
+            );
             assert!(!out.status.success(), "{target} must not be writable");
         }
-        assert_eq!(std::fs::read_to_string(plugin.path().join("manifest.json")).unwrap(), "{}");
+        assert_eq!(
+            std::fs::read_to_string(plugin.path().join("manifest.json")).unwrap(),
+            "{}"
+        );
         // Nothing outside is readable: the home directory holds the vault.
         let out = run_confined(&policy, &["cat /etc/passwd"]);
         assert!(!out.status.success(), "/etc/passwd must not be readable");
     }
-
 }
 
 // ---------------------------------------------------------------------------

@@ -51,6 +51,38 @@ pub async fn build_router(
     // Creating a second one here would show usage the drivers never consult.
     let health_tracker = kernel.health_tracker.clone();
 
+    // Plugin gRPC dispatch (plugin.proto host services + PluginCallbacks
+    // client cache). Loopback by default; `plugin_grpc_addr = ""` disables.
+    let plugin_dispatch = {
+        let addr = kernel.config.plugin_grpc_addr.trim();
+        if addr.is_empty() {
+            None
+        } else {
+            let dispatch = Arc::new(t3rnel_runtime::plugin_grpc::PluginDispatch::new(
+                kernel.config.home_dir.clone(),
+                kernel.config.plugin_dev_mode,
+            ));
+            match addr.parse::<std::net::SocketAddr>() {
+                Ok(sock) => {
+                    let d = dispatch.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = d.serve(sock).await {
+                            tracing::error!("plugin gRPC dispatch exited: {e}");
+                        }
+                    });
+                    tracing::info!("plugin gRPC dispatch listening on {sock}");
+                    Some(dispatch)
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "plugin_grpc_addr {addr:?} is not a socket address — dispatch disabled"
+                    );
+                    None
+                }
+            }
+        }
+    };
+
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -73,6 +105,7 @@ pub async fn build_router(
         ide_commands: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         ide_command_notify: Arc::new(tokio::sync::Notify::new()),
         health_tracker,
+        plugin_dispatch,
     });
 
     // Start WS cron broadcaster — subscribes to kernel event bus and pushes
@@ -1172,6 +1205,7 @@ pub async fn build_router(
     {
         let channels = conv_state.channels.clone();
         let service = conv_state.service.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
@@ -1180,8 +1214,72 @@ pub async fn build_router(
                     match result {
                         Ok(events) => {
                             for event in events {
-                                if let Err(e) = service.handle_inbound(event).await {
-                                    tracing::warn!("inbound route on {id} failed: {e}");
+                                match service.handle_inbound(event).await {
+                                    Ok(t3rnel_runtime::conversations::RoutedInbound::AgentMessage {
+                                        agent_id: Some(agent_ref),
+                                        event,
+                                        ..
+                                    }) => {
+                                        // Agent-message consumer (18 §2):
+                                        // resolve the bound agent and run a
+                                        // real turn; the reply goes back out
+                                        // through the same channel adapter.
+                                        let st = state.clone();
+                                        let svc = service.clone();
+                                        tokio::spawn(async move {
+                                            let Some(agent_id) =
+                                                crate::routes::resolve_agent_id(&st, &agent_ref)
+                                            else {
+                                                tracing::warn!(
+                                                    "inbound for unknown agent {agent_ref:?} on {}",
+                                                    event.conversation_key()
+                                                );
+                                                return;
+                                            };
+                                            let kernel_handle: Arc<dyn t3rnel_runtime::kernel_handle::KernelHandle> =
+                                                st.kernel.clone();
+                                            match st
+                                                .kernel
+                                                .send_message_with_handle_and_blocks(
+                                                    agent_id,
+                                                    &event.text,
+                                                    Some(kernel_handle),
+                                                    None,
+                                                    Some(event.sender.clone()),
+                                                    None,
+                                                )
+                                                .await
+                                            {
+                                                Ok(result) => {
+                                                    let reply = result.response.trim().to_string();
+                                                    if reply.is_empty() || result.silent {
+                                                        return;
+                                                    }
+                                                    if let Err(e) = svc
+                                                        .send_message(
+                                                            &event.channel,
+                                                            &event.account,
+                                                            &event.thread_key,
+                                                            &reply,
+                                                        )
+                                                        .await
+                                                    {
+                                                        tracing::warn!(
+                                                            "agent reply send on {} failed: {e}",
+                                                            event.conversation_key()
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => tracing::warn!(
+                                                    "agent dispatch for {agent_ref} failed: {e}"
+                                                ),
+                                            }
+                                        });
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        tracing::warn!("inbound route on {id} failed: {e}")
+                                    }
                                 }
                             }
                         }

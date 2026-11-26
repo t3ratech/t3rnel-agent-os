@@ -169,6 +169,14 @@ impl RouteRegistry {
             .find(|r| r.method == method.to_ascii_uppercase() && r.path == path)
             .map(|r| r.handler.clone())
     }
+    /// Remove every method registration for `path` (UnmountRoutes).
+    pub fn remove_path(&self, path: &str) {
+        self.routes.lock().unwrap().retain(|r| r.path != path);
+    }
+    /// Remove all registrations (UnmountRoutes with empty list).
+    pub fn clear(&self) {
+        self.routes.lock().unwrap().clear();
+    }
     pub fn len(&self) -> usize {
         self.routes.lock().unwrap().len()
     }
@@ -214,7 +222,8 @@ impl<'a> ScheduleService<'a> {
             .map_err(|e| StorageError::MigrationFailed(0, e.to_string()))?;
         // Jobs live in plugin_kv under a namespaced key — per-plugin by
         // construction, no shared table needed.
-        self.storage.state_set(&format!("schedule:{}", job.id), &blob)
+        self.storage
+            .state_set(&format!("schedule:{}", job.id), &blob)
     }
 
     pub fn remove(&self, id: &str) -> Result<(), StorageError> {
@@ -431,7 +440,10 @@ impl<'a> ApprovalService<'a> {
         let blob = serde_json::to_string(req)
             .map_err(|e| StorageError::MigrationFailed(0, e.to_string()))?;
         self.storage.state_set(&Self::key(&req.id), &blob)?;
-        let idx = self.storage.state_get("approval:index")?.unwrap_or_default();
+        let idx = self
+            .storage
+            .state_get("approval:index")?
+            .unwrap_or_default();
         if !idx.lines().any(|l| l == req.id) {
             self.storage
                 .state_set("approval:index", &format!("{idx}{}\n", req.id))?;
@@ -470,7 +482,10 @@ impl<'a> ApprovalService<'a> {
         if self.storage.state_cas(&key, &current, &next)? {
             Ok(())
         } else {
-            Err(StorageError::MigrationFailed(0, format!("approval {id} changed while deciding")))
+            Err(StorageError::MigrationFailed(
+                0,
+                format!("approval {id} changed while deciding"),
+            ))
         }
     }
 
@@ -877,11 +892,22 @@ mod tests {
     }
 
     fn svc_for(s: &PluginStorage) -> PluginServices<'_> {
-        PluginServices::new(s, ToolRegistry::new(std::iter::empty()), [DataClass::Public])
+        PluginServices::new(
+            s,
+            ToolRegistry::new(std::iter::empty()),
+            [DataClass::Public],
+        )
     }
 
     fn pending(id: &str, action: &str) -> ApprovalRequest {
-        ApprovalRequest::new(id, "pay.send", RiskClass::Financial, "pay 5 to alice", action, 600)
+        ApprovalRequest::new(
+            id,
+            "pay.send",
+            RiskClass::Financial,
+            "pay 5 to alice",
+            action,
+            600,
+        )
     }
 
     #[test]
@@ -889,30 +915,106 @@ mod tests {
         let (_d, s) = store();
         let svc = svc_for(&s);
         assert!(!ApprovalService::requires_approval(RiskClass::Read));
-        assert!(!ApprovalService::requires_approval(RiskClass::WriteReversible));
-        for gated in [RiskClass::Financial, RiskClass::ExternalEffect, RiskClass::System, RiskClass::WriteIrreversible] {
+        assert!(!ApprovalService::requires_approval(
+            RiskClass::WriteReversible
+        ));
+        for gated in [
+            RiskClass::Financial,
+            RiskClass::ExternalEffect,
+            RiskClass::System,
+            RiskClass::WriteIrreversible,
+        ] {
             assert!(ApprovalService::requires_approval(gated), "{gated:?}");
         }
-        assert!(svc.approval.check("fs.read", RiskClass::Read, None, "").unwrap());
-        assert!(!svc.approval.check("pay.send", RiskClass::Financial, None, "x").unwrap());
-        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("nope"), "x").unwrap());
+        assert!(svc
+            .approval
+            .check("fs.read", RiskClass::Read, None, "")
+            .unwrap());
+        assert!(!svc
+            .approval
+            .check("pay.send", RiskClass::Financial, None, "x")
+            .unwrap());
+        assert!(!svc
+            .approval
+            .check("pay.send", RiskClass::Financial, Some("nope"), "x")
+            .unwrap());
     }
 
     #[test]
     fn an_approval_names_one_exact_action_and_works_once() {
         let (_d, s) = store();
         let svc = svc_for(&s);
-        svc.approval.request(&pending("ap1", "to=alice;amount=5")).unwrap();
+        svc.approval
+            .request(&pending("ap1", "to=alice;amount=5"))
+            .unwrap();
         // Pending is not enough.
-        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("ap1"), "to=alice;amount=5").unwrap());
-        svc.approval.resolve("ap1", ApprovalState::Approved).unwrap();
+        assert!(!svc
+            .approval
+            .check(
+                "pay.send",
+                RiskClass::Financial,
+                Some("ap1"),
+                "to=alice;amount=5"
+            )
+            .unwrap());
+        svc.approval
+            .resolve("ap1", ApprovalState::Approved)
+            .unwrap();
         // The approval covers the action the user was shown and nothing else.
-        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("ap1"), "to=mallory;amount=5").unwrap(), "another recipient");
-        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("ap1"), "to=alice;amount=5000").unwrap(), "another amount");
-        assert!(!svc.approval.check("pay.other", RiskClass::Financial, Some("ap1"), "to=alice;amount=5").unwrap(), "another capability");
+        assert!(
+            !svc.approval
+                .check(
+                    "pay.send",
+                    RiskClass::Financial,
+                    Some("ap1"),
+                    "to=mallory;amount=5"
+                )
+                .unwrap(),
+            "another recipient"
+        );
+        assert!(
+            !svc.approval
+                .check(
+                    "pay.send",
+                    RiskClass::Financial,
+                    Some("ap1"),
+                    "to=alice;amount=5000"
+                )
+                .unwrap(),
+            "another amount"
+        );
+        assert!(
+            !svc.approval
+                .check(
+                    "pay.other",
+                    RiskClass::Financial,
+                    Some("ap1"),
+                    "to=alice;amount=5"
+                )
+                .unwrap(),
+            "another capability"
+        );
         // The right action passes - once.
-        assert!(svc.approval.check("pay.send", RiskClass::Financial, Some("ap1"), "to=alice;amount=5").unwrap());
-        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("ap1"), "to=alice;amount=5").unwrap(), "an approval is spent by use");
+        assert!(svc
+            .approval
+            .check(
+                "pay.send",
+                RiskClass::Financial,
+                Some("ap1"),
+                "to=alice;amount=5"
+            )
+            .unwrap());
+        assert!(
+            !svc.approval
+                .check(
+                    "pay.send",
+                    RiskClass::Financial,
+                    Some("ap1"),
+                    "to=alice;amount=5"
+                )
+                .unwrap(),
+            "an approval is spent by use"
+        );
         assert!(svc.approval.get("ap1").unwrap().unwrap().used);
     }
 
@@ -923,10 +1025,22 @@ mod tests {
         let mut req = pending("old", "a");
         req.expires_at = chrono::Utc::now().timestamp() - 1;
         svc.approval.request(&req).unwrap();
-        svc.approval.resolve("old", ApprovalState::Approved).unwrap();
-        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("old"), "a").unwrap());
+        svc.approval
+            .resolve("old", ApprovalState::Approved)
+            .unwrap();
+        assert!(!svc
+            .approval
+            .check("pay.send", RiskClass::Financial, Some("old"), "a")
+            .unwrap());
         // And no request may ask for more than a day.
-        let long = ApprovalRequest::new("long", "pay.send", RiskClass::Financial, "d", "a", 10 * 365 * 24 * 3600);
+        let long = ApprovalRequest::new(
+            "long",
+            "pay.send",
+            RiskClass::Financial,
+            "d",
+            "a",
+            10 * 365 * 24 * 3600,
+        );
         assert!(long.expires_at <= chrono::Utc::now().timestamp() + MAX_APPROVAL_TTL_SECS + 1);
     }
 
@@ -936,8 +1050,14 @@ mod tests {
         let svc = svc_for(&s);
         svc.approval.request(&pending("d1", "a")).unwrap();
         svc.approval.resolve("d1", ApprovalState::Denied).unwrap();
-        assert!(svc.approval.resolve("d1", ApprovalState::Approved).is_err(), "a denial is final");
-        assert!(svc.approval.resolve("missing", ApprovalState::Approved).is_err());
+        assert!(
+            svc.approval.resolve("d1", ApprovalState::Approved).is_err(),
+            "a denial is final"
+        );
+        assert!(svc
+            .approval
+            .resolve("missing", ApprovalState::Approved)
+            .is_err());
         // Re-filing the same id (to replace a denied request with a fresh pending one) is refused.
         assert!(svc.approval.request(&pending("d1", "a")).is_err());
         // A request cannot arrive already approved or already spent.
@@ -958,9 +1078,19 @@ mod tests {
         sa.approval.request(&pending("r1", "x")).unwrap();
         sa.approval.resolve("r1", ApprovalState::Approved).unwrap();
         let sb = svc_for(&b);
-        let first = sa.approval.check("pay.send", RiskClass::Financial, Some("r1"), "x").unwrap();
-        let second = sb.approval.check("pay.send", RiskClass::Financial, Some("r1"), "x").unwrap();
-        assert_eq!([first, second].iter().filter(|ok| **ok).count(), 1, "exactly one winner");
+        let first = sa
+            .approval
+            .check("pay.send", RiskClass::Financial, Some("r1"), "x")
+            .unwrap();
+        let second = sb
+            .approval
+            .check("pay.send", RiskClass::Financial, Some("r1"), "x")
+            .unwrap();
+        assert_eq!(
+            [first, second].iter().filter(|ok| **ok).count(),
+            1,
+            "exactly one winner"
+        );
     }
 
     #[test]
@@ -977,15 +1107,28 @@ mod tests {
         s.kv_set("approval:f1", &forged).unwrap();
         s.kv_set("approval:index", "f1\n").unwrap();
         s.kv_set("crashlog", "[]").unwrap();
-        assert!(!svc.approval.check("pay.send", RiskClass::Financial, Some("f1"), "to=alice").unwrap(), "self-approval must fail");
-        assert_eq!(svc.approval.get("f1").unwrap().unwrap().state, ApprovalState::Pending);
+        assert!(
+            !svc.approval
+                .check("pay.send", RiskClass::Financial, Some("f1"), "to=alice")
+                .unwrap(),
+            "self-approval must fail"
+        );
+        assert_eq!(
+            svc.approval.get("f1").unwrap().unwrap().state,
+            ApprovalState::Pending
+        );
     }
 
     #[test]
     fn memory_labels_cannot_be_rewritten_through_the_plugin_kv() {
         let (_d, s) = store();
         let mem = MemoryService::new(&s, [DataClass::Public, DataClass::Personal]);
-        mem.set("note", "tainted text", &[DataClass::Personal].into_iter().collect()).unwrap();
+        mem.set(
+            "note",
+            "tainted text",
+            &[DataClass::Personal].into_iter().collect(),
+        )
+        .unwrap();
         // A plugin overwrites the record with the same key and empty labels, trying to launder it.
         let laundered = serde_json::to_string(&MemoryEntry {
             key: "note".into(),
@@ -995,7 +1138,12 @@ mod tests {
         })
         .unwrap();
         s.kv_set("mem:note", &laundered).unwrap();
-        assert!(mem.get("note").unwrap().unwrap().taint.contains(&DataClass::Personal));
+        assert!(mem
+            .get("note")
+            .unwrap()
+            .unwrap()
+            .taint
+            .contains(&DataClass::Personal));
     }
 
     #[test]

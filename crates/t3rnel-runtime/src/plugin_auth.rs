@@ -153,7 +153,13 @@ impl ScopedTokenService {
     fn mac(&self, provider: &str, scopes_b64: &str, exp: i64) -> Hmac<Sha256> {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.ref_key.as_slice())
             .expect("hmac accepts any key length");
-        mac.update(format!("authref-v2|{provider}|{scopes_b64}|{exp}|{}", self.plugin_id).as_bytes());
+        mac.update(
+            format!(
+                "authref-v2|{provider}|{scopes_b64}|{exp}|{}",
+                self.plugin_id
+            )
+            .as_bytes(),
+        );
         mac
     }
 
@@ -379,7 +385,11 @@ impl ScopedTokenService {
         let scope_blob = scopes.join(",");
         let encoded =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(scope_blob.as_bytes());
-        let mac = hex::encode(self.mac(provider, &encoded, exp.timestamp()).finalize().into_bytes());
+        let mac = hex::encode(
+            self.mac(provider, &encoded, exp.timestamp())
+                .finalize()
+                .into_bytes(),
+        );
         let token_ref = format!(
             "{REF_PREFIX}{provider}:{encoded}:{}:{}:{mac}",
             exp.timestamp(),
@@ -453,7 +463,10 @@ mod tests {
 
     fn service() -> (tempfile::TempDir, ScopedTokenService) {
         let dir = tempfile::tempdir().unwrap();
-        let vault = Arc::new(VaultBroker::open(dir.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME), false));
+        let vault = Arc::new(VaultBroker::open(
+            dir.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME),
+            false,
+        ));
         vault
             .unlock_ordered(Some(Zeroizing::new([21u8; 32])))
             .unwrap();
@@ -602,9 +615,15 @@ mod tests {
     #[tokio::test]
     async fn a_reference_cannot_be_widened_or_extended_by_editing_it() {
         let (_d, svc) = service();
-        svc.store_grant("google", grant(&["scope:a", "scope:b"], Some(86_400))).unwrap();
-        let g = svc.issue("google", &["scope:a".to_string()], Some(60)).await.unwrap();
-        svc.resolve(&g.token_ref).await.expect("the genuine reference resolves");
+        svc.store_grant("google", grant(&["scope:a", "scope:b"], Some(86_400)))
+            .unwrap();
+        let g = svc
+            .issue("google", &["scope:a".to_string()], Some(60))
+            .await
+            .unwrap();
+        svc.resolve(&g.token_ref)
+            .await
+            .expect("the genuine reference resolves");
         // Fields: 0 provider, 1 scopes, 2 expiry, 3 plugin, 4 mac.
         let wider = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("scope:a,scope:b");
         let far = (Utc::now().timestamp() + 365 * 86_400).to_string();
@@ -616,28 +635,50 @@ mod tests {
             ("no mac", tamper(&g.token_ref, 4, "")),
             ("wrong mac", tamper(&g.token_ref, 4, &"ab".repeat(32))),
         ] {
-            assert!(matches!(svc.resolve(&forged).await, Err(AuthError::BadRef)), "{what} must be refused");
+            assert!(
+                matches!(svc.resolve(&forged).await, Err(AuthError::BadRef)),
+                "{what} must be refused"
+            );
         }
         // A reference built from scratch, in the exact format, without the key.
-        let scratch = format!("authref:v2:google:{wider}:{far}:org.test.auth:{}", "00".repeat(32));
-        assert!(matches!(svc.resolve(&scratch).await, Err(AuthError::BadRef)));
+        let scratch = format!(
+            "authref:v2:google:{wider}:{far}:org.test.auth:{}",
+            "00".repeat(32)
+        );
+        assert!(matches!(
+            svc.resolve(&scratch).await,
+            Err(AuthError::BadRef)
+        ));
     }
 
     #[tokio::test]
     async fn a_reference_issued_to_one_plugin_is_useless_to_another() {
         let dir = tempfile::tempdir().unwrap();
-        let vault = Arc::new(VaultBroker::open(dir.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME), false));
-        vault.unlock_ordered(Some(Zeroizing::new([22u8; 32]))).unwrap();
+        let vault = Arc::new(VaultBroker::open(
+            dir.path().join(t3rnel_extensions::vault::VAULT_FILE_NAME),
+            false,
+        ));
+        vault
+            .unlock_ordered(Some(Zeroizing::new([22u8; 32])))
+            .unwrap();
         let alice = ScopedTokenService::new(vault.clone(), "org.test.alice");
         let mallory = ScopedTokenService::new(vault, "org.test.mallory");
-        alice.store_grant("google", grant(&["s"], Some(3600))).unwrap();
+        alice
+            .store_grant("google", grant(&["s"], Some(3600)))
+            .unwrap();
         let g = alice.issue("google", &["s".into()], None).await.unwrap();
         assert!(alice.resolve(&g.token_ref).await.is_ok());
         // Same vault, same grant, a reference taken from alice: refused.
-        assert!(matches!(mallory.resolve(&g.token_ref).await, Err(AuthError::BadRef)));
+        assert!(matches!(
+            mallory.resolve(&g.token_ref).await,
+            Err(AuthError::BadRef)
+        ));
         // Even re-labelled as mallory's, the MAC (alice's key) does not verify.
         let relabelled = tamper(&g.token_ref, 3, "org.test.mallory");
-        assert!(matches!(mallory.resolve(&relabelled).await, Err(AuthError::BadRef)));
+        assert!(matches!(
+            mallory.resolve(&relabelled).await,
+            Err(AuthError::BadRef)
+        ));
     }
 
     // ---- refresh -------------------------------------------------------------------------------------
@@ -650,10 +691,14 @@ mod tests {
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             loop {
-                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
                 let mut buf = vec![0u8; 8192];
                 let n = sock.read(&mut buf).await.unwrap_or(0);
-                log.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).to_string());
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 let _ = sock.write_all(reply.as_bytes()).await;
             }
@@ -691,7 +736,11 @@ mod tests {
         );
         a.unwrap();
         b.unwrap();
-        assert_eq!(seen.lock().unwrap().len(), 1, "a rotating refresh token is spent once");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "a rotating refresh token is spent once"
+        );
     }
 
     #[tokio::test]
@@ -707,18 +756,29 @@ mod tests {
         svc.store_grant("google", g).unwrap();
         let err = svc.issue("google", &["s".into()], None).await.unwrap_err();
         assert!(matches!(err, AuthError::Refresh(_, _)), "{err:?}");
-        assert!(captured.lock().unwrap().is_empty(), "the redirect target received a request");
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "the redirect target received a request"
+        );
     }
 
     #[tokio::test]
     async fn a_plain_http_token_endpoint_is_refused_before_any_request() {
         let (_d, svc) = service();
-        for endpoint in ["http://accounts.example/token", "ftp://x/token", "not a url", "http://127.0.0.1.evil.example/token"] {
+        for endpoint in [
+            "http://accounts.example/token",
+            "ftp://x/token",
+            "not a url",
+            "http://127.0.0.1.evil.example/token",
+        ] {
             let mut g = grant(&["s"], Some(-10));
             g.token_endpoint = Some(endpoint.into());
             svc.store_grant("google", g).unwrap();
             let err = svc.issue("google", &["s".into()], None).await.unwrap_err();
-            assert!(matches!(&err, AuthError::Refresh(_, m) if m.contains("https")), "{endpoint}: {err:?}");
+            assert!(
+                matches!(&err, AuthError::Refresh(_, m) if m.contains("https")),
+                "{endpoint}: {err:?}"
+            );
         }
     }
 
@@ -731,8 +791,16 @@ mod tests {
         let issued = svc.issue("google", &["s".into()], None).await.unwrap();
         svc.revoke_grant("google").unwrap();
         let left = svc.load_grant("google").unwrap();
-        assert!(left.access_token.is_empty() && left.refresh_token.is_none() && left.client_secret.is_none(), "{left:?}");
-        assert!(svc.resolve(&issued.token_ref).await.is_err(), "a reference issued before revocation stops working");
+        assert!(
+            left.access_token.is_empty()
+                && left.refresh_token.is_none()
+                && left.client_secret.is_none(),
+            "{left:?}"
+        );
+        assert!(
+            svc.resolve(&issued.token_ref).await.is_err(),
+            "a reference issued before revocation stops working"
+        );
         assert!(svc.issue("google", &["s".into()], None).await.is_err());
     }
 }

@@ -18,6 +18,7 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use t3rnel_runtime::plugin_auth::{ScopedTokenService, StoredGrant};
 use t3rnel_runtime::plugin_lifecycle::{
     InstallOptions, LifecycleError, PluginManager, DEV_MODE_WARNING,
 };
@@ -26,6 +27,9 @@ use t3rnel_runtime::plugin_lifecycle::{
 pub struct PluginAdminState {
     pub manager: Arc<PluginManager>,
     pub install_opts: InstallOptions,
+    /// In-flight PKCE consent flows keyed by provider (single active flow
+    /// per provider — starting a new one replaces the old).
+    pub oauth_flows: Arc<dashmap::DashMap<String, PendingConsent>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,9 +65,13 @@ pub fn router(manager: Arc<PluginManager>, opts: InstallOptions) -> Router {
         .route("/api/plugins/{id}/update", post(update_plugin))
         .route("/api/plugins/{id}/rollback", post(rollback_plugin))
         .route("/api/plugins/{id}/launch-check", get(launch_check))
+        .route("/api/plugins/oauth/start", post(oauth_start))
+        .route("/api/plugins/oauth/complete", post(oauth_complete))
+        .route("/api/plugins/oauth/status", get(oauth_status))
         .with_state(PluginAdminState {
             manager,
             install_opts: opts,
+            oauth_flows: Arc::new(dashmap::DashMap::new()),
         })
 }
 
@@ -160,6 +168,287 @@ async fn launch_check(
         Ok(()) => Ok(Json(serde_json::json!({ "id": id, "launch": "permitted" }))),
         Err(e) => Err(err(e)),
     }
+}
+
+// ---------------------------------------------------------------------------
+// OAuth consent → vault grant (18 §8)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct OAuthStartRequest {
+    /// Provider key: "google" | "github" | "microsoft" | "slack" (or any
+    /// bundled integration whose template declares `[oauth]`).
+    pub provider: String,
+    /// Optional OAuth client id override (defaults come from config).
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OAuthCompleteRequest {
+    pub provider: String,
+    /// Authorization code — normally delivered by the loopback callback;
+    /// supplied explicitly for non-browser/mock flows.
+    pub code: String,
+}
+
+/// Find the bundled template whose `[oauth]` block serves `provider`.
+fn oauth_template(provider: &str) -> Option<t3rnel_extensions::OAuthTemplate> {
+    for (_id, toml_str) in t3rnel_extensions::bundled::bundled_integrations() {
+        if let Ok(t) = toml::from_str::<t3rnel_extensions::IntegrationTemplate>(toml_str) {
+            if let Some(oauth) = t.oauth {
+                if oauth.provider == provider {
+                    return Some(oauth);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build the vault-backed token service used to persist consent grants.
+/// Grants are provider-keyed (`oauth:<provider>`), shared by every plugin —
+/// `plugin_id` only labels issued `authref:` tokens, so "host" is correct
+/// for user-level consent.
+fn consent_token_service(
+    st: &PluginAdminState,
+) -> Result<ScopedTokenService, (StatusCode, String)> {
+    let home = st.manager.home().to_path_buf();
+    let vault = std::sync::Arc::new(t3rnel_runtime::plugin_vault::VaultBroker::open(
+        home.join(t3rnel_extensions::vault::VAULT_FILE_NAME),
+        st.install_opts.dev_mode,
+    ));
+    vault
+        .unlock_ordered(None)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(ScopedTokenService::new(vault, "host"))
+}
+
+/// Host-side record of an in-flight consent flow — everything `/complete`
+/// and `/status` need without holding the callback receiver (owned by the
+/// background task).
+pub struct PendingConsent {
+    pub auth_url: String,
+    pub state: String,
+    pub callback_port: u16,
+    pub redirect_uri: String,
+    pub token_url: String,
+    pub client_id: String,
+    /// PKCE verifier — credential-adjacent, lives only in this process.
+    pub verifier: zeroize::Zeroizing<String>,
+    /// Aborts the loopback callback server when the flow is completed
+    /// explicitly or superseded.
+    pub abort: tokio::task::AbortHandle,
+    pub started_at: String,
+}
+
+/// Persist OAuth tokens as a vault grant (`oauth:<provider>`) via the same
+/// `ScopedTokenService::store_grant` path plugin Auth.Token issuance reads.
+async fn store_consent_grant(
+    st: &PluginAdminState,
+    provider: &str,
+    template: &t3rnel_extensions::OAuthTemplate,
+    client_id: &str,
+    tokens: t3rnel_extensions::oauth::OAuthTokens,
+) -> Result<(), String> {
+    let svc = consent_token_service(st).map_err(|(_, m)| m)?;
+    let scopes: Vec<String> = tokens
+        .scope
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let expires_at = if tokens.expires_in == 0 {
+        None
+    } else {
+        Some(chrono::Utc::now().timestamp() + tokens.expires_in as i64)
+    };
+    svc.store_grant(
+        provider,
+        StoredGrant {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            expires_at,
+            scopes: if scopes.is_empty() {
+                template.scopes.clone()
+            } else {
+                scopes
+            },
+            token_endpoint: Some(template.token_url.clone()),
+            client_id: Some(client_id.to_string()),
+            client_secret: None,
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// POST /api/plugins/oauth/start — begin a PKCE consent flow. Returns the
+/// authorization URL; the loopback callback completes the flow in the
+/// background and stores the grant. `client_id` overrides the configured
+/// default for this provider.
+async fn oauth_start(
+    State(st): State<PluginAdminState>,
+    Json(req): Json<OAuthStartRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let provider = req.provider.trim().to_string();
+    let template = oauth_template(&provider).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("no OAuth template for provider {provider:?}"),
+        )
+    })?;
+    let client_id = req.client_id.unwrap_or_else(|| {
+        t3rnel_extensions::oauth::resolve_client_ids(&t3rnel_types::config::OAuthConfig::default())
+            .get(&provider)
+            .cloned()
+            .unwrap_or_default()
+    });
+    if client_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("no client_id configured for provider {provider:?}"),
+        ));
+    }
+    let flow = t3rnel_extensions::oauth::begin_pkce_flow(&template, &client_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let auth_url = flow.auth_url.clone();
+    let callback_port = flow.callback_port;
+    let state = flow.state.clone();
+
+    // Register the pending flow for /status + /complete, then spawn the
+    // background completion that awaits the loopback callback.
+    st.oauth_flows.insert(
+        provider.clone(),
+        PendingConsent {
+            auth_url: auth_url.clone(),
+            state: state.clone(),
+            callback_port,
+            redirect_uri: flow.redirect_uri.clone(),
+            token_url: flow.token_url.clone(),
+            client_id: client_id.clone(),
+            verifier: zeroize::Zeroizing::new(flow.verifier.to_string()),
+            abort: flow.server_handle.abort_handle(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+        },
+    );
+    {
+        let flows = st.oauth_flows.clone();
+        let provider_bg = provider.clone();
+        let st_bg = st.clone();
+        tokio::spawn(async move {
+            let outcome = async {
+                let code = tokio::time::timeout(std::time::Duration::from_secs(300), flow.code_rx)
+                    .await
+                    .map_err(|_| "oauth callback timed out".to_string())?
+                    .map_err(|_| "oauth callback channel closed".to_string())?
+                    .map_err(|e| e.to_string())?;
+                flow.server_handle.abort();
+                let tokens = t3rnel_extensions::oauth::exchange_code(
+                    &flow.token_url,
+                    &flow.redirect_uri,
+                    &flow.client_id,
+                    flow.verifier.as_str(),
+                    &code,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                store_consent_grant(&st_bg, &provider_bg, &template, &client_id, tokens).await
+            }
+            .await;
+            flows.remove(&provider_bg);
+            match outcome {
+                Ok(()) => tracing::info!("oauth consent stored for {provider_bg}"),
+                Err(e) => tracing::warn!("oauth consent for {provider_bg} failed: {e}"),
+            }
+        });
+    }
+
+    Ok(Json(serde_json::json!({
+        "provider": provider,
+        "auth_url": auth_url,
+        "callback_port": callback_port,
+        "state": state,
+    })))
+}
+
+/// POST /api/plugins/oauth/complete — finish a started flow explicitly with
+/// an authorization code (non-browser/mock-provider path; the loopback
+/// callback path completes in the background without this call).
+async fn oauth_complete(
+    State(st): State<PluginAdminState>,
+    Json(req): Json<OAuthCompleteRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let provider = req.provider.trim().to_string();
+    let pending = st
+        .oauth_flows
+        .remove(&provider)
+        .map(|(_, p)| p)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("no pending oauth flow for {provider:?}"),
+            )
+        })?;
+    pending.abort.abort();
+    let template = oauth_template(&provider).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("no OAuth template for provider {provider:?}"),
+        )
+    })?;
+    let tokens = t3rnel_extensions::oauth::exchange_code(
+        &pending.token_url,
+        &pending.redirect_uri,
+        &pending.client_id,
+        pending.verifier.as_str(),
+        &req.code,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    store_consent_grant(&st, &provider, &template, &pending.client_id, tokens)
+        .await
+        .map_err(|m| (StatusCode::INTERNAL_SERVER_ERROR, m))?;
+    Ok(Json(
+        serde_json::json!({ "provider": provider, "linked": true }),
+    ))
+}
+
+/// GET /api/plugins/oauth/status?provider=X — pending-flow and stored-grant
+/// state. Never returns token material.
+async fn oauth_status(
+    State(st): State<PluginAdminState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let provider = q.get("provider").cloned().unwrap_or_default();
+    let pending = st.oauth_flows.get(&provider).map(|p| {
+        serde_json::json!({
+            "auth_url": p.auth_url,
+            "callback_port": p.callback_port,
+            "state": p.state,
+            "started_at": p.started_at,
+        })
+    });
+    let linked = match consent_token_service(&st) {
+        Ok(svc) => {
+            svc.issue(&provider, &[], Some(1)).await.is_ok() || grant_present(&st, &provider).await
+        }
+        Err(_) => false,
+    };
+    Ok(Json(serde_json::json!({
+        "provider": provider,
+        "pending": pending,
+        "linked": linked,
+    })))
+}
+
+/// Vault presence check for `oauth:<provider>` — issues a 1s token with no
+/// scopes (always a subset) purely to prove a stored grant exists.
+async fn grant_present(st: &PluginAdminState, provider: &str) -> bool {
+    let Ok(svc) = consent_token_service(st) else {
+        return false;
+    };
+    svc.issue(provider, &[], Some(1)).await.is_ok()
 }
 
 #[cfg(test)]

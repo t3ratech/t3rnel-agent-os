@@ -68,7 +68,7 @@ chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # Database
-rusqlite = { version = "0.39", features = ["bundled", "serde_json"] }
+rusqlite = { version = "0.39", features = ["bundled", "serde_json", "hooks"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
 
 # CLI

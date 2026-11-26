@@ -461,7 +461,10 @@ mod tests {
     }
 
     fn unlocked_vault(home: &Path) -> Arc<VaultBroker> {
-        let vault = Arc::new(VaultBroker::open(home.join(t3rnel_extensions::vault::VAULT_FILE_NAME), false));
+        let vault = Arc::new(VaultBroker::open(
+            home.join(t3rnel_extensions::vault::VAULT_FILE_NAME),
+            false,
+        ));
         vault
             .unlock_ordered(Some(Zeroizing::new([11u8; 32])))
             .unwrap();

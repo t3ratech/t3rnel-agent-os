@@ -238,6 +238,7 @@ mod tests {
             permissions_summary: vec![],
             entitlement_account: None,
             files: Default::default(),
+            permissions: None,
         };
         fs::write(
             pkg.join("manifest.json"),

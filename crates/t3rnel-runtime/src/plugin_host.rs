@@ -12,9 +12,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::plugin_lifecycle::{PluginManifestLite, SignedPermissions};
 use crate::plugin_proxy::{
-    AuthBinding, EgressRule, PluginProxy, ProxyError, ProxyRequest, ProxyResponse,
+    AuthBinding, EgressRule, PluginProxy, ProxyError, ProxyRequest, ProxyResponse, Scheme,
 };
+use crate::plugin_services::DataClass;
 use crate::plugin_storage::PluginStorage;
 use crate::plugin_vault::VaultBroker;
 
@@ -73,6 +75,9 @@ pub struct PluginHost {
     pub storage: PluginStorage,
     pub proxy: PluginProxy,
     pub vault: Arc<VaultBroker>,
+    /// Data classes declared in the signed manifest — enforced by the
+    /// memory service and the llm data-class ceiling.
+    pub data_classes: Vec<DataClass>,
     /// One service per host, so the key that authenticates token references
     /// outlives a single call.
     auth: crate::plugin_auth::ScopedTokenService,
@@ -84,10 +89,138 @@ pub struct PluginHostConfig {
     pub plugin_id: String,
     pub egress: Vec<EgressRule>,
     pub auth: Vec<AuthBinding>,
+    /// Data classes the manifest declared (`permissions.data_classes`) —
+    /// enforced by the memory service; anything else is refused.
+    pub data_classes: Vec<DataClass>,
     /// Master key for vault unlock (host-provided; `None` → dev env path).
     pub vault_key: Option<zeroize::Zeroizing<[u8; 32]>>,
     /// Allow `T3RNEL_VAULT_KEY` unlock (dev/CI only).
     pub dev_mode: bool,
+}
+
+/// Map a signed [`SignedPermissions`] block to proxy egress + auth rules.
+///
+/// Egress: one rule per declared `network.hosts` entry. Methods/paths come
+/// from the auth rules that cover the host (a rule with empty `hosts`
+/// covers every declared host); a host no auth rule touches gets `*`/` * `
+/// — declaring the host IS the grant for unauthenticated APIs. Private
+/// upstreams are never allowed from a manifest (`allow_private` stays
+/// false); loopback adapters need an explicit host-side grant.
+///
+/// Auth: each `permissions.auth` rule becomes one [`AuthBinding`]; a rule
+/// with empty `hosts` is expanded to every declared egress host so the
+/// proxy's first-match evaluation sees the same scope the manifest meant.
+/// Unknown scheme strings are dropped (fail closed — the secret is simply
+/// never injected).
+fn signed_permissions_to_rules(perms: &SignedPermissions) -> (Vec<EgressRule>, Vec<AuthBinding>) {
+    let network_hosts = &perms.network_hosts;
+    let mut egress = Vec::new();
+    for host in network_hosts {
+        let mut methods: Vec<String> = Vec::new();
+        let mut paths: Vec<String> = Vec::new();
+        for rule in &perms.auth {
+            let covers = rule.hosts.is_empty() || rule.hosts.iter().any(|h| h == host);
+            if !covers {
+                continue;
+            }
+            for m in &rule.methods {
+                let m = m.to_ascii_uppercase();
+                if !methods.contains(&m) {
+                    methods.push(m);
+                }
+            }
+            for p in &rule.paths {
+                if !paths.contains(p) {
+                    paths.push(p.clone());
+                }
+            }
+        }
+        egress.push(EgressRule {
+            host: host.clone(),
+            methods: if methods.is_empty() {
+                vec!["*".into()]
+            } else {
+                methods
+            },
+            paths: if paths.is_empty() {
+                vec!["*".into()]
+            } else {
+                paths
+            },
+            allow_private: false,
+            allow_encoded_slash: perms.encoded_slash_hosts.iter().any(|h| h == host),
+        });
+    }
+    let mut auth = Vec::new();
+    for rule in &perms.auth {
+        let scheme = match rule.scheme.as_str() {
+            "bearer" => Scheme::Bearer,
+            "header" => Scheme::Header,
+            "basic" => Scheme::Basic,
+            "query-key" => Scheme::QueryKey,
+            "hmac-sha256" => Scheme::HmacSha256,
+            _ => continue, // unknown scheme: never inject the secret
+        };
+        auth.push(AuthBinding {
+            secret: rule.secret.clone(),
+            scheme,
+            hosts: if rule.hosts.is_empty() {
+                network_hosts.clone()
+            } else {
+                rule.hosts.clone()
+            },
+            methods: rule
+                .methods
+                .iter()
+                .map(|m| m.to_ascii_uppercase())
+                .collect(),
+            paths: rule.paths.clone(),
+        });
+    }
+    (egress, auth)
+}
+
+/// Parse the manifest's declared data classes (the closed §14.10 set).
+/// Unknown strings are dropped — a plugin cannot widen its own classes by
+/// typo; it just loses the label.
+pub fn manifest_data_classes(perms: Option<&SignedPermissions>) -> Vec<DataClass> {
+    let Some(p) = perms else { return Vec::new() };
+    p.data_classes
+        .iter()
+        .filter_map(|s| match s.as_str() {
+            "public" => Some(DataClass::Public),
+            "plugin-private" => Some(DataClass::PluginPrivate),
+            "personal" => Some(DataClass::Personal),
+            "financial" => Some(DataClass::Financial),
+            "credential-adjacent" => Some(DataClass::CredentialAdjacent),
+            "unclassified" => Some(DataClass::Unclassified),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Build a [`PluginHostConfig`] from an installed (signed) manifest. This
+/// is the manifest→host wiring the dispatch layer calls when a plugin
+/// connects: egress, auth bindings and data classes all come from the
+/// signature-covered `permissions` block. Packages signed before that block
+/// existed get `None` → empty rules → fail closed.
+pub fn host_config_from_manifest(
+    manifest: &PluginManifestLite,
+    vault_key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    dev_mode: bool,
+) -> PluginHostConfig {
+    let (egress, auth) = match &manifest.permissions {
+        Some(p) => signed_permissions_to_rules(p),
+        None => (Vec::new(), Vec::new()),
+    };
+    PluginHostConfig {
+        plugin_id: manifest.id.clone(),
+        egress,
+        auth,
+        data_classes: manifest_data_classes(manifest.permissions.as_ref()),
+        vault_key,
+        dev_mode,
+    }
 }
 
 impl PluginHost {
@@ -105,12 +238,14 @@ impl PluginHost {
         vault.unlock_ordered(cfg.vault_key)?;
         let resolver = vault.as_resolver();
         let proxy = PluginProxy::new(cfg.plugin_id.clone(), cfg.egress, cfg.auth, resolver);
-        let auth = crate::plugin_auth::ScopedTokenService::new(vault.clone(), cfg.plugin_id.clone());
+        let auth =
+            crate::plugin_auth::ScopedTokenService::new(vault.clone(), cfg.plugin_id.clone());
         Ok(PluginHost {
             plugin_id: cfg.plugin_id,
             storage,
             proxy,
             vault,
+            data_classes: cfg.data_classes,
             auth,
         })
     }
@@ -119,6 +254,15 @@ impl PluginHost {
     /// audit the *reference-level* facts (host, method, status — never
     /// secrets or bodies), and return the response.
     pub async fn http(&self, req: &ProxyRequest) -> Result<ProxyResponse, ProxyError> {
+        self.http_audited(req).await.map(|(r, _)| r)
+    }
+
+    /// Same as [`http`](Self::http) but also returns the audit rowid of the
+    /// recorded call — the `audit_id` the proto `HttpResponse` carries.
+    pub async fn http_audited(
+        &self,
+        req: &ProxyRequest,
+    ) -> Result<(ProxyResponse, i64), ProxyError> {
         let result = self.proxy.request(req).await;
         let (action, detail) = match &result {
             Ok(resp) => (
@@ -132,8 +276,8 @@ impl PluginHost {
             Err(e) => ("http.refused", format!("{e}")),
         };
         // Audit failures of the audit write itself must not mask the result.
-        let _ = self.storage.audit_append(action, &detail);
-        result
+        let audit_id = self.storage.audit_append_id(action, &detail).unwrap_or(0);
+        result.map(|r| (r, audit_id))
     }
 
     /// `audit` host service read: tail of this plugin's audit trail.
@@ -186,6 +330,7 @@ mod tests {
                 allow_encoded_slash: false,
             }],
             auth: vec![],
+            data_classes: vec![DataClass::Public],
             vault_key: Some(zeroize::Zeroizing::new([5u8; 32])),
             dev_mode: false,
         }

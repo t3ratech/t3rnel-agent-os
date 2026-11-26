@@ -372,3 +372,50 @@ edition-2021 on touched files; no stub markers; test binaries deleted.
 - Live gateway smoke not run (needs `npm install` of baileys; unit tests
   cover the HTTP contract against a mock).
 - Telegram adapter is §7 step 5+ (not this task).
+
+## Session 13 additions — gRPC dispatch landed + consent/agent-consumer wiring (uncommitted)
+
+- **gRPC/tonic dispatch (blocker 1, core side DONE)**: `crates/t3rnel-runtime/build.rs`
+  runs `tonic-build` via `protoc-bin-vendored` (no system protoc needed) over
+  `proto/t3rnel/plugin/v1/plugin.proto`. `src/plugin_grpc.rs` (~2000 ln)
+  implements all 14 host services on one `PluginHostGrpc` struct +
+  `PluginDispatch::serve(Arc<Self>, addr)`; per-plugin `PluginRuntime`
+  (PluginHost + RouteRegistry + tool/view maps) keyed by signed manifest id,
+  `manifest_digest` verified byte-for-byte, `x-plugin-id`/`x-plugin-callback`
+  metadata enforced, `PluginCallbacksClient` cached per plugin for
+  CallTool/HandleRoute/ScheduleTick/OnEvent/RenderView/Health/BriefingQuery/
+  StatusQuery. Storage service got namespaced KV (`ns\x1fkey` encoding),
+  authorizer-guarded plugin SQL connection (host tables + ATTACH/PRAGMA
+  denied, progress-handler deadline), content-addressed blobs, batched
+  migrations with snapshots. `PluginHostConfig` is now built from the
+  *signed* manifest `permissions` block (`host_config_from_manifest`,
+  `SignedPermissions`/`SignedAuthRule` added to `PluginManifestLite`;
+  `plugin_sign.rs` populates it for v1 and lite packages — packages signed
+  before the block existed fail closed). LLM/agent seams are honest
+  `UNAVAILABLE` until `with_llm`/`with_agent_dispatcher` inject backends.
+- **Daemon wiring**: `plugin_grpc_addr` config (default `127.0.0.1:50061`,
+  empty disables); `build_router` spawns `PluginDispatch::serve` and stores
+  `Arc<PluginDispatch>` on `AppState.plugin_dispatch`.
+- **Agent-message consumer (blocker 3, DONE)**: the inbound poll loop now
+  handles `RoutedInbound::AgentMessage{agent_id:Some}` — resolves the bound
+  agent (name or UUID via `routes::resolve_agent_id`, now `pub(crate)`),
+  runs `send_message_with_handle_and_blocks`, and sends the reply back
+  through `ConversationService::send_message` on the same channel/thread.
+- **OAuth consent → store_grant (blocker 2, mechanics DONE)**:
+  `t3rnel-extensions/src/oauth.rs` split `run_pkce_flow` into
+  `begin_pkce_flow` (returns auth_url + StartedPkceFlow), `exchange_code`
+  and `finish_pkce_flow`. `plugin_admin.rs` adds `POST /api/plugins/oauth/
+  {start,complete}` + `GET /status?provider=` — start returns the auth URL
+  and spawns background callback→exchange→`ScopedTokenService::store_grant`
+  (vault `oauth:<provider>`); complete finishes explicitly with a code
+  (mock/non-browser path). Grants then resolve through `Auth.Token` /
+  `oauth-access:<provider>` proxy injection.
+- **Checks**: `cargo check -p t3rnel-api` (incl. runtime/extensions/types)
+  clean; rustfmt edition-2021 on all touched files. Clippy + live gRPC
+  smoke still running at report time — see FINAL-REPORT.md.
+
+**Still open**: plugin-side `GrpcHostClient` in `plugins/plugin-core`
+(comms `main.rs` `T3RNEL_PLUGIN_ADDR` swap); WhatsApp gateway
+`GET /media/:id` + adapter attachment resolution; `X-Hub-Signature-256`
+app-secret HMAC on the Business webhook; TUF roles (§14.11); live
+daemon proof of dispatch↔plugin binary and oauth mock-provider flow.
