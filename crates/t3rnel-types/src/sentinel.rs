@@ -404,7 +404,7 @@ mod tests {
         let body = serde_json::json!({
             "id": "memory-export-fixture",
             "kind": "fact",
-            "content": "A representative operational note about exporting a bounded set of memory records. ".repeat(8),
+            "content": "A representative operational note about exporting a bounded set of memory records. ".repeat(18),
             "summary": "Recorded export fixture",
             "metadata": {"source": "memory-export-regression", "labels": ["project", "operations"]}
         })

@@ -244,11 +244,14 @@ fn raw_url_has_dot_segment_or_backslash(raw: &str) -> bool {
     })
 }
 
+/// `parse_url_with` with the strict default (encoded slashes refused). Only the
+/// test suite uses the strict shorthand; `request` picks the mode per rule.
+#[cfg(test)]
 fn parse_url(url: &str) -> Result<ParsedUrl, ProxyError> {
     parse_url_with(url, false)
 }
 
-/// [`parse_url`], optionally allowing `%2F` inside path segments (see [`EgressRule::allow_encoded_slash`]).
+/// [`parse_url_with`], optionally allowing `%2F` inside path segments (see [`EgressRule::allow_encoded_slash`]).
 fn parse_url_with(url: &str, allow_encoded_slash: bool) -> Result<ParsedUrl, ProxyError> {
     // The URL parser silently deletes tabs and newlines and may mishandle NUL,
     // so what it checks would differ from what the caller wrote. Refuse them.
@@ -532,7 +535,6 @@ impl PluginProxy {
         // Parse leniently first, only to learn the host and find the rule; then hold the URL
         // to the strict rules unless that rule explicitly allows encoded slashes.
         let mut parsed = parse_url_with(&req.url, true)?;
-        let path = parsed.path_query.clone();
         let method = req.method.to_ascii_uppercase();
         if !matches!(
             method.as_str(),
@@ -806,6 +808,7 @@ mod tests {
             methods: vec!["*".to_string()],
             paths: vec!["*".to_string()],
             allow_private,
+            allow_encoded_slash: false,
         }
     }
 
@@ -870,9 +873,9 @@ mod tests {
         ] {
             assert!(normalise_path(bad, false).is_err(), "{bad} must be rejected");
         }
-        assert_eq!(normalise_path("/a/b/../c").unwrap(), "/a/c");
-        assert_eq!(normalise_path("/a/./b?x=1").unwrap(), "/a/b?x=1");
-        assert_eq!(normalise_path("/").unwrap(), "/");
+        assert_eq!(normalise_path("/a/b/../c", false).unwrap(), "/a/c");
+        assert_eq!(normalise_path("/a/./b?x=1", false).unwrap(), "/a/b?x=1");
+        assert_eq!(normalise_path("/", false).unwrap(), "/");
     }
 
     #[tokio::test]
