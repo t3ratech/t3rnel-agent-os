@@ -98,30 +98,33 @@ fn migrate_one(
         }
     }
 
-    // 2. Memory: the dev host stored `{key: value-string}`. Records keep the
-    //    plugin-private label (every migrated plugin declares it).
+    // 2. Memory. The dev host kept `{key: {"value": "<text>", "taint": [..], "updated_at": ".."}}`.
+    //    The value is the text inside the envelope, never the envelope itself. A first version of
+    //    this tool stored the envelope as the value; such a record is recognised and repaired.
     let classes: Vec<DataClass> = manifest_data_classes(manifest.permissions.as_ref());
-    let label: std::collections::BTreeSet<DataClass> = if classes.contains(&DataClass::PluginPrivate)
-    {
-        [DataClass::PluginPrivate].into()
-    } else {
-        classes.first().copied().into_iter().collect()
-    };
+    let fallback: std::collections::BTreeSet<DataClass> =
+        if classes.contains(&DataClass::PluginPrivate) {
+            [DataClass::PluginPrivate].into()
+        } else {
+            classes.first().copied().into_iter().collect()
+        };
     let mem = MemoryService::new(&host.storage, classes.iter().copied());
-    let (mut imported, mut present) = (0, 0);
+    let (mut imported, mut present, mut repaired) = (0, 0, 0);
     if let Ok(text) = std::fs::read_to_string(state.join("memory.json")) {
         let map: std::collections::BTreeMap<String, serde_json::Value> = serde_json::from_str(&text)?;
-        for (key, value) in map {
-            if mem.get(&key)?.is_some() {
-                present += 1;
-                continue;
+        for (key, entry) in map {
+            let (value, taint) = unwrap_entry(&entry, &classes, &fallback);
+            match mem.get(&key)? {
+                None => {
+                    mem.set(&key, &value, &taint)?;
+                    imported += 1;
+                }
+                Some(existing) if is_envelope(&existing.value) => {
+                    mem.set(&key, &value, &taint)?;
+                    repaired += 1;
+                }
+                Some(_) => present += 1,
             }
-            let value = match value {
-                serde_json::Value::String(s) => s,
-                other => other.to_string(),
-            };
-            mem.set(&key, &value, &label)?;
-            imported += 1;
         }
     }
 
@@ -140,6 +143,80 @@ fn migrate_one(
         }
     }
     Ok(format!(
-        "{moved} secret(s) moved to the vault ({kept} already there), {imported} memory key(s) imported ({present} already present), {config}"
+        "{moved} secret(s) moved to the vault ({kept} already there), {imported} memory key(s) imported, {repaired} repaired ({present} already present), {config}"
     ))
+}
+
+/// The text and taint inside a dev-host memory entry.
+fn unwrap_entry(
+    entry: &serde_json::Value,
+    declared: &[DataClass],
+    fallback: &std::collections::BTreeSet<DataClass>,
+) -> (String, std::collections::BTreeSet<DataClass>) {
+    let Some(obj) = entry.as_object().filter(|o| o.contains_key("value")) else {
+        return (
+            match entry {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            },
+            fallback.clone(),
+        );
+    };
+    let value = match &obj["value"] {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let taint: std::collections::BTreeSet<DataClass> = obj
+        .get("taint")
+        .and_then(|t| t.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|c| match c.as_str()? {
+            "public" => Some(DataClass::Public),
+            "plugin-private" => Some(DataClass::PluginPrivate),
+            "personal" => Some(DataClass::Personal),
+            "financial" => Some(DataClass::Financial),
+            "credential-adjacent" => Some(DataClass::CredentialAdjacent),
+            "unclassified" => Some(DataClass::Unclassified),
+            _ => None,
+        })
+        .filter(|c| declared.contains(c))
+        .collect();
+    (value, if taint.is_empty() { fallback.clone() } else { taint })
+}
+
+/// True for the value an earlier run of this tool wrote: the whole dev-host envelope as text.
+fn is_envelope(value: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(value)
+        .ok()
+        .and_then(|v| v.as_object().map(|o| {
+            o.len() == 3 && o.contains_key("value") && o.contains_key("taint") && o.contains_key("updated_at")
+        }))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_envelope_is_unwrapped_and_the_taint_kept_when_declared() {
+        let entry = serde_json::json!({"value": "[1,2]", "taint": ["personal", "plugin-private"], "updated_at": "x"});
+        let declared = [DataClass::PluginPrivate, DataClass::Personal];
+        let (v, t) = unwrap_entry(&entry, &declared, &[DataClass::PluginPrivate].into());
+        assert_eq!(v, "[1,2]");
+        assert_eq!(t, [DataClass::Personal, DataClass::PluginPrivate].into());
+        // An undeclared class is dropped, and with nothing left the fallback label is used.
+        let entry = serde_json::json!({"value": "v", "taint": ["financial"], "updated_at": "x"});
+        let (_, t) = unwrap_entry(&entry, &declared, &[DataClass::PluginPrivate].into());
+        assert_eq!(t, [DataClass::PluginPrivate].into());
+    }
+
+    #[test]
+    fn a_value_written_as_a_whole_envelope_is_recognised_and_a_real_value_is_not() {
+        assert!(is_envelope(r#"{"value":"[]","taint":["plugin-private"],"updated_at":"t"}"#));
+        assert!(!is_envelope(r#"[{"id":"post-1"}]"#));
+        assert!(!is_envelope(r#"{"value":"a","extra":1}"#));
+        assert!(!is_envelope("plain text"));
+    }
 }

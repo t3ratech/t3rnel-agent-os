@@ -31,6 +31,11 @@ pub struct PluginAdminState {
     /// exercises the install surface alone.
     pub supervisor: Option<Arc<PluginSupervisor>>,
     pub install_opts: InstallOptions,
+    /// Where an installed plugin's morning-briefing section is registered.
+    pub briefing: Option<(
+        Arc<t3rnel_runtime::plugin_grpc::PluginDispatch>,
+        Arc<t3rnel_runtime::briefing::BriefingService>,
+    )>,
     /// In-flight PKCE consent flows keyed by provider (single active flow
     /// per provider — starting a new one replaces the old).
     pub oauth_flows: Arc<dashmap::DashMap<String, PendingConsent>>,
@@ -66,6 +71,10 @@ pub fn router(
     manager: Arc<PluginManager>,
     supervisor: Option<Arc<PluginSupervisor>>,
     opts: InstallOptions,
+    briefing: Option<(
+        Arc<t3rnel_runtime::plugin_grpc::PluginDispatch>,
+        Arc<t3rnel_runtime::briefing::BriefingService>,
+    )>,
 ) -> Router {
     Router::new()
         .route("/api/plugins", get(list_plugins))
@@ -89,6 +98,7 @@ pub fn router(
             manager,
             supervisor,
             install_opts: opts,
+            briefing,
             oauth_flows: Arc::new(dashmap::DashMap::new()),
         })
 }
@@ -185,6 +195,14 @@ async fn install_plugin(
     // Installing a plugin starts it. A refusal here (cannot confine, tampered) is
     // reported by the state endpoint, not turned into an install failure: the
     // package is installed either way.
+    if let Some((dispatch, briefing)) = &st.briefing {
+        briefing.register_source(Arc::new(
+            t3rnel_runtime::plugin_grpc::DispatchBriefingSource::new(
+                dispatch.clone(),
+                report.plugin_id.clone(),
+            ),
+        ));
+    }
     if let Some(sup) = &st.supervisor {
         if let Err(e) = sup.start(&report.plugin_id).await {
             tracing::warn!(plugin = %report.plugin_id, "installed but not started: {e}");
@@ -593,7 +611,7 @@ mod tests {
             trusted_keys: vec![],
             dev_mode: true,
         };
-        (router(mgr, None, opts), home)
+        (router(mgr, None, opts, None), home)
     }
 
     #[tokio::test]

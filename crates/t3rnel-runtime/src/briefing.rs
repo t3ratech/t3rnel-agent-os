@@ -405,8 +405,11 @@ impl BriefingService {
     }
 
     /// Register a briefing source (installed plugin).
+    /// A source for a plugin id already registered is replaced, never doubled.
     pub fn register_source(&self, source: Arc<dyn BriefingSource>) {
-        self.sources.lock().unwrap().push(source);
+        let mut sources = self.sources.lock().unwrap();
+        sources.retain(|s| s.plugin_id() != source.plugin_id());
+        sources.push(source);
     }
 
     pub fn sources(&self) -> Vec<String> {

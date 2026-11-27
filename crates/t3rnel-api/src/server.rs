@@ -1150,6 +1150,19 @@ pub async fn build_router(
         dev_mode: kernel.config.plugin_dev_mode,
     };
     let plugin_mgr = Arc::new(plugin_mgr);
+    // The conversation stack comes first: plugins send through it, and their
+    // briefing sections are collected by its briefing service.
+    let (conv_state, _local_channel) = crate::conversations::build_conversation_stack(&kernel);
+    if let Some(dispatch) = &state.plugin_dispatch {
+        // Plugins that declared `conversations` send and count through this service.
+        dispatch.attach_conversations(conv_state.service.clone());
+        // Every installed plugin contributes a section to the morning briefing.
+        for id in plugin_mgr.list() {
+            conv_state.briefing.register_source(Arc::new(
+                t3rnel_runtime::plugin_grpc::DispatchBriefingSource::new(dispatch.clone(), id),
+            ));
+        }
+    }
     // Start every installed plugin, confined, once the daemon is up. A plugin
     // that is refused (tampered files, revoked signer, cannot be confined) is
     // reported and skipped; it does not stop the others.
@@ -1166,7 +1179,12 @@ pub async fn build_router(
         supervisor.spawn_ticker();
         supervisor
     });
-    let plugin_router = crate::plugin_admin::router(plugin_mgr, plugin_supervisor, plugin_opts)
+    let plugin_router = crate::plugin_admin::router(
+        plugin_mgr,
+        plugin_supervisor,
+        plugin_opts,
+        state.plugin_dispatch.clone().map(|d| (d, conv_state.briefing.clone())),
+    )
         .layer(axum::middleware::from_fn_with_state(
             auth_state.clone(),
             middleware::auth,
@@ -1185,11 +1203,6 @@ pub async fn build_router(
     // (/api/channels itself belongs to the legacy channel-config surface.)
     // Same post-.with_state merge pattern and middleware stack as plugins.
     // ------------------------------------------------------------------
-    let (conv_state, _local_channel) = crate::conversations::build_conversation_stack(&kernel);
-    // Plugins that declared `conversations` send and count through this service.
-    if let Some(dispatch) = &state.plugin_dispatch {
-        dispatch.attach_conversations(conv_state.service.clone());
-    }
     // Connect every linked channel account through the vault broker
     // (18 §3). Per-account failures are logged, never fatal — the local
     // dashboard adapter is always present.

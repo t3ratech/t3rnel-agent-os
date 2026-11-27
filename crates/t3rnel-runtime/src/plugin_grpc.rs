@@ -2136,3 +2136,184 @@ impl conversations_server::Conversations for PluginHostGrpc {
         }))
     }
 }
+
+// ---------------------------------------------------------------------------
+// briefing source — a running plugin's report, collected through the dispatch
+// ---------------------------------------------------------------------------
+
+/// Feeds one plugin's `BriefingQuery`/`StatusQuery` answers into the morning
+/// briefing. A plugin that is not running answers UNAVAILABLE, which the
+/// briefing service reports as UNREACHABLE instead of skipping it.
+pub struct DispatchBriefingSource {
+    dispatch: Arc<PluginDispatch>,
+    plugin_id: String,
+}
+
+impl DispatchBriefingSource {
+    pub fn new(dispatch: Arc<PluginDispatch>, plugin_id: impl Into<String>) -> Self {
+        DispatchBriefingSource { dispatch, plugin_id: plugin_id.into() }
+    }
+}
+
+fn briefing_level(l: i32) -> crate::briefing::StatusLevel {
+    use crate::briefing::StatusLevel as B;
+    match pb::StatusLevel::try_from(l).unwrap_or(pb::StatusLevel::Unspecified) {
+        pb::StatusLevel::Ok => B::Ok,
+        pb::StatusLevel::Critical => B::Critical,
+        // A plugin cannot claim UNREACHABLE, and an unspecified level is not "fine".
+        _ => B::Attention,
+    }
+}
+
+fn data_class_name(c: i32) -> &'static str {
+    use pb::DataClass as P;
+    match P::try_from(c).unwrap_or(P::Unspecified) {
+        P::Public => "public",
+        P::PluginPrivate => "plugin-private",
+        P::Personal => "personal",
+        P::Financial => "financial",
+        P::CredentialAdjacent => "credential-adjacent",
+        P::Unclassified | P::Unspecified => "unclassified",
+    }
+}
+
+fn action_risk(c: i32) -> SvcRiskClass {
+    // An action that does not say how risky it is is treated as the riskiest.
+    match pb::RiskClass::try_from(c).unwrap_or(pb::RiskClass::Unspecified) {
+        pb::RiskClass::Unspecified => SvcRiskClass::System,
+        other => svc_risk_class(other as i32),
+    }
+}
+
+/// Convert a plugin's report. `plugin_id` is the core's own knowledge of who
+/// answered; whatever identity the body claims is ignored.
+fn briefing_from_pb(plugin_id: &str, r: pb::BriefingReport) -> crate::briefing::BriefingReport {
+    crate::briefing::BriefingReport {
+        plugin: plugin_id.to_string(),
+        level: briefing_level(r.level),
+        items: r
+            .items
+            .into_iter()
+            .map(|i| crate::briefing::BriefingItem {
+                id: i.id,
+                text: i.text,
+                // Everything a plugin says is untrusted data, whatever it claims.
+                taint: Some(crate::conversations::Provenance {
+                    source: format!("plugin:{plugin_id}"),
+                    untrusted: true,
+                    data_classes: i
+                        .taint
+                        .map(|t| t.data_classes.iter().map(|c| data_class_name(*c).to_string()).collect())
+                        .unwrap_or_default(),
+                }),
+                tags: i.tags,
+                template_id: (!i.template_id.is_empty()).then_some(i.template_id),
+                template_slots: i.template_slots.into_iter().collect(),
+            })
+            .collect(),
+        actions: r
+            .actions
+            .into_iter()
+            .map(|a| crate::briefing::ActionRequest {
+                id: a.id,
+                label: a.label,
+                detail: a.detail,
+                risk_class: action_risk(a.risk_class),
+                capability: a.capability,
+                // Only the core assigns a binding id.
+                approval_binding_id: None,
+            })
+            .collect(),
+        metrics: r.metrics.into_iter().collect(),
+        headline: r.headline,
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::briefing::BriefingSource for DispatchBriefingSource {
+    fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    async fn briefing_query(
+        &self,
+        q: &crate::briefing::BriefingQuery,
+    ) -> Result<crate::briefing::BriefingReport, String> {
+        let req = pb::BriefingQueryRequest {
+            plugin: Some(pb::PluginIdentity { id: self.plugin_id.clone(), ..Default::default() }),
+            report_date: q.report_date.clone(),
+            as_of: Some(ts_to_proto(q.as_of)),
+        };
+        let r = self
+            .dispatch
+            .briefing_query(&self.plugin_id, req)
+            .await
+            .map_err(|s| s.message().to_string())?;
+        Ok(briefing_from_pb(&self.plugin_id, r))
+    }
+
+    async fn status_query(
+        &self,
+        q: &crate::briefing::StatusQuery,
+    ) -> Result<crate::briefing::StatusReport, String> {
+        let req = pb::StatusQueryRequest {
+            plugin: Some(pb::PluginIdentity { id: self.plugin_id.clone(), ..Default::default() }),
+            since: q.since.map(ts_to_proto),
+        };
+        let r = self
+            .dispatch
+            .status_query(&self.plugin_id, req)
+            .await
+            .map_err(|s| s.message().to_string())?;
+        Ok(crate::briefing::StatusReport {
+            plugin: self.plugin_id.clone(),
+            level: briefing_level(r.level),
+            headline: r.headline,
+            metrics: r.metrics.into_iter().collect(),
+            detail: r.detail,
+        })
+    }
+}
+
+#[cfg(test)]
+mod briefing_source_tests {
+    use super::*;
+
+    #[test]
+    fn a_report_is_converted_with_the_cores_identity_and_untrusted_taint() {
+        let r = pb::BriefingReport {
+            plugin: Some(pb::PluginIdentity { id: "org.evil.claims-to-be-someone".into(), ..Default::default() }),
+            level: pb::StatusLevel::Ok as i32,
+            items: vec![pb::BriefingItem {
+                id: "i".into(),
+                text: "hello".into(),
+                taint: Some(pb::Taint { untrusted: false, ..Default::default() }),
+                ..Default::default()
+            }],
+            actions: vec![pb::ActionRequest {
+                id: "a".into(),
+                label: "pay".into(),
+                risk_class: pb::RiskClass::Unspecified as i32,
+                approval_binding_id: "AB-000001".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let b = briefing_from_pb("org.real.plugin", r);
+        assert_eq!(b.plugin, "org.real.plugin");
+        let taint = b.items[0].taint.as_ref().unwrap();
+        assert!(taint.untrusted, "plugin text is always untrusted");
+        assert_eq!(taint.source, "plugin:org.real.plugin");
+        // An unstated risk is the highest one, and the binding id is the core's to assign.
+        assert_eq!(b.actions[0].risk_class, SvcRiskClass::System);
+        assert!(b.actions[0].approval_binding_id.is_none());
+    }
+
+    #[test]
+    fn a_plugin_cannot_claim_unreachable_and_an_unspecified_level_is_attention() {
+        assert_eq!(briefing_level(pb::StatusLevel::Unreachable as i32), crate::briefing::StatusLevel::Attention);
+        assert_eq!(briefing_level(pb::StatusLevel::Unspecified as i32), crate::briefing::StatusLevel::Attention);
+        assert_eq!(briefing_level(pb::StatusLevel::Ok as i32), crate::briefing::StatusLevel::Ok);
+        assert_eq!(briefing_level(pb::StatusLevel::Critical as i32), crate::briefing::StatusLevel::Critical);
+    }
+}
