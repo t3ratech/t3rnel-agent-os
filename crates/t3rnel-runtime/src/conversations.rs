@@ -176,12 +176,8 @@ pub enum BindingState {
 pub struct ApprovalBinding {
     /// "AB-<seq>" — stable, shown to the user in the prompt.
     pub id: String,
-    /// Backend approval id, or `self:<binding id>` for self-contained asks.
+    /// The backend approval id this binding decides.
     pub approval_ref: String,
-    /// True when no backend record exists; decisions are recorded on the
-    /// binding + audit chain only.
-    #[serde(default)]
-    pub self_contained: bool,
     pub capability: String,
     pub summary: String,
     pub risk: String,
@@ -269,6 +265,11 @@ pub enum ConversationError {
     Policy(String, String),
     #[error("backend decision failed for {0}: {1}")]
     Backend(String, String),
+    /// The approval backend could not record the ask, so nothing was sent: a
+    /// prompt whose YES decides nothing would make the person think they had
+    /// authorised something they had not.
+    #[error("the approval could not be registered, so no prompt was sent: {0}")]
+    NotRegistered(String),
     #[error("no adapter for channel {0}")]
     NoChannel(String),
     #[error("send failed on {0}: {1}")]
@@ -277,6 +278,53 @@ pub enum ConversationError {
     RateLimited,
     #[error("io error: {0}")]
     Io(String),
+}
+
+#[async_trait]
+impl crate::plugin_grpc::ConversationsPort for ConversationService {
+    async fn send(
+        &self,
+        channel: &str,
+        account: &str,
+        thread_key: &str,
+        text: &str,
+    ) -> Result<String, String> {
+        self.send_message(channel, account, thread_key, text)
+            .await
+            .map(|r| r.message_id.unwrap_or_else(|| r.accepted_at.to_rfc3339()))
+            .map_err(|e| e.to_string())
+    }
+
+    fn counters(&self) -> crate::plugin_grpc::ConversationCounters {
+        let since = Utc::now() - chrono::Duration::hours(24);
+        let threads = self.threads();
+        let pending = self
+            .bindings()
+            .iter()
+            .filter(|b| matches!(b.state, BindingState::Pending | BindingState::Deferred))
+            .count() as u64;
+        crate::plugin_grpc::ConversationCounters {
+            threads_total: threads.len() as u64,
+            // A thread is unread when the last thing in it was inbound.
+            unread_threads: threads
+                .iter()
+                .filter(|t| match (t.last_inbound_at, t.last_outbound_at) {
+                    (Some(i), Some(o)) => i > o,
+                    (Some(_), None) => true,
+                    _ => false,
+                })
+                .count() as u64,
+            inbound_today: threads
+                .iter()
+                .filter(|t| t.last_inbound_at.is_some_and(|i| i > since))
+                .count() as u64,
+            outbound_today: threads
+                .iter()
+                .filter(|t| t.last_outbound_at.is_some_and(|o| o > since))
+                .count() as u64,
+            pending_approvals: pending,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -840,10 +888,12 @@ impl ConversationService {
         approval_ref: Option<String>,
         ttl: Option<Duration>,
     ) -> Result<ApprovalBinding, ConversationError> {
-        // Resolve or register the backend record.
-        let (approval_ref, self_contained) = match approval_ref {
-            Some(r) => (r, false),
-            None => match self
+        // Resolve or register the backend record. If it cannot be registered the
+        // ask fails here, before anything is sent: every approval a person is
+        // asked for must be one the backend will actually act on.
+        let approval_ref = match approval_ref {
+            Some(r) => r,
+            None => self
                 .approvals
                 .register(&NewApprovalRequest {
                     capability: capability.to_string(),
@@ -854,13 +904,14 @@ impl ConversationService {
                     ttl_secs: ttl.map(|d| d.as_secs() as i64),
                 })
                 .await
-            {
-                Ok(r) => (r, false),
-                Err(_) => {
-                    // Self-contained binding: the ask lives only here + audit.
-                    (String::new(), true)
-                }
-            },
+                .map_err(|e| {
+                    self.audit(
+                        "conversations",
+                        &format!("approval.register_failed cap={capability}"),
+                        &format!("refused: {e}"),
+                    );
+                    ConversationError::NotRegistered(e)
+                })?,
         };
 
         let id = {
@@ -868,16 +919,10 @@ impl ConversationService {
             *seq += 1;
             format!("AB-{:06}", *seq)
         };
-        let approval_ref = if self_contained {
-            format!("self:{id}")
-        } else {
-            approval_ref
-        };
         let ttl = ttl.unwrap_or(DEFAULT_BINDING_TTL);
         let binding = ApprovalBinding {
             id: id.clone(),
             approval_ref,
-            self_contained,
             capability: capability.to_string(),
             summary: summary.to_string(),
             risk: risk.to_string(),
@@ -1058,19 +1103,15 @@ impl ConversationService {
             let bindings = self.bindings.lock().unwrap();
             bindings.get(binding_id).unwrap().clone()
         };
-        if !binding.self_contained {
-            self.approvals
-                .revalidate(&binding)
-                .map_err(|e| ConversationError::Policy(binding_id.to_string(), e))?;
-        }
+        self.approvals
+            .revalidate(&binding)
+            .map_err(|e| ConversationError::Policy(binding_id.to_string(), e))?;
 
         // Backend decide (single-use + expiry enforced there too).
-        if !binding.self_contained {
-            self.approvals
-                .decide(&binding.approval_ref, verdict, note.clone(), via)
-                .await
-                .map_err(|e| ConversationError::Backend(binding.approval_ref.clone(), e))?;
-        }
+        self.approvals
+            .decide(&binding.approval_ref, verdict, note.clone(), via)
+            .await
+            .map_err(|e| ConversationError::Backend(binding.approval_ref.clone(), e))?;
 
         // Record on the binding.
         {
@@ -1767,7 +1808,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn self_contained_binding_decides_without_backend() {
+    async fn counters_report_unread_threads_and_pending_approvals_from_real_state() {
+        use crate::plugin_grpc::ConversationsPort;
         let f = fixture();
         f.service
             .registry()
@@ -1775,9 +1817,38 @@ mod tests {
             .await
             .into_iter()
             .for_each(|(_, r)| r.unwrap());
-        // approval_ref=None → register fails (MemApprovals has no register
-        // override... it uses default → error) → self-contained.
-        let b = f
+        assert_eq!(f.service.counters(), Default::default());
+        // One inbound message: one thread, unread, active today.
+        f.service.handle_inbound(inbound("hello")).await.unwrap();
+        let c = f.service.counters();
+        assert_eq!((c.threads_total, c.unread_threads, c.inbound_today), (1, 1, 1));
+        assert_eq!(c.pending_approvals, 0);
+        // Replying through the port reads it: no longer unread.
+        let receipt = ConversationsPort::send(&*f.service, "local:web", "web", "+1555", "hi").await.unwrap();
+        assert!(!receipt.is_empty());
+        let c = f.service.counters();
+        assert_eq!((c.unread_threads, c.outbound_today), (0, 1));
+        // A delivered approval counts as pending.
+        let pref = f.approvals.add("cap.x", "do x");
+        f.service
+            .deliver_approval("local:web", "web", "+1555", "+1555", "cap.x", "do x", "medium", Some(pref), None)
+            .await
+            .unwrap();
+        assert_eq!(f.service.counters().pending_approvals, 1);
+    }
+
+    #[tokio::test]
+    async fn an_approval_the_backend_cannot_register_fails_loudly_and_sends_nothing() {
+        let f = fixture();
+        f.service
+            .registry()
+            .connect_all()
+            .await
+            .into_iter()
+            .for_each(|(_, r)| r.unwrap());
+        let before = f.service.bindings().len();
+        // approval_ref=None asks the backend to register; MemApprovals cannot.
+        let err = f
             .service
             .deliver_approval(
                 "local:web",
@@ -1791,16 +1862,12 @@ mod tests {
                 None,
             )
             .await
-            .unwrap();
-        assert!(b.self_contained);
-        f.service
-            .resolve_binding(&b.id, ApprovalVerdict::Approve, "t", None)
-            .await
-            .unwrap();
-        assert_eq!(
-            f.service.binding(&b.id).unwrap().state,
-            BindingState::Approved
-        );
+            .unwrap_err();
+        assert!(matches!(err, ConversationError::NotRegistered(_)), "{err:?}");
+        // No binding was created, so there is no YES that could decide nothing.
+        assert_eq!(f.service.bindings().len(), before);
+        // And no prompt went out to the person.
+        assert_eq!(f.adapter.outbound_len(), 0, "no approval prompt may be sent");
     }
 
     #[tokio::test]

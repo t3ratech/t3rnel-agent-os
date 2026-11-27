@@ -172,6 +172,12 @@ pub struct SignedPermissions {
     /// `permissions.data_classes` — the closed §14.10 set as strings.
     #[serde(default)]
     pub data_classes: Vec<String>,
+    /// The host services the manifest `requires`. The core serves a gated
+    /// service (`conversations`) only to a plugin that declared it here, inside
+    /// the signed bytes. Packages signed before this field existed have none,
+    /// so they are refused those services.
+    #[serde(default)]
+    pub host_services: Vec<String>,
 }
 
 /// One `permissions.auth` rule as signed into the package.
@@ -284,6 +290,20 @@ impl PluginManager {
     }
 
     /// The T3rnel home directory this manager operates on.
+    /// Installed plugins whose signed manifest binds the secret name `secret`
+    /// (for example `oauth-access:google`).
+    pub fn plugins_binding_secret(&self, secret: &str) -> Vec<String> {
+        self.list()
+            .into_iter()
+            .filter(|id| {
+                Self::read_manifest(&self.install_dir(id))
+                    .ok()
+                    .and_then(|m| m.permissions)
+                    .is_some_and(|p| p.auth.iter().any(|r| r.secret == secret))
+            })
+            .collect()
+    }
+
     pub fn home(&self) -> &Path {
         &self.home
     }

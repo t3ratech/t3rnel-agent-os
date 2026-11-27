@@ -66,7 +66,7 @@ async fn start_test_server_with_provider_and_audio(
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
     let config_dir = tmp.path().join("config");
     std::fs::create_dir_all(&config_dir).expect("Failed to create config dir");
-    let source = std::path::Path::new("/mnt/ext4_work/t3rnel/config/category-templates.toml");
+    let source = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/category-templates.toml"));
     if source.exists() {
         std::fs::copy(source, config_dir.join("category-templates.toml")).ok();
     }

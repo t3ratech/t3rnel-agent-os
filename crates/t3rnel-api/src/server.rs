@@ -51,37 +51,16 @@ pub async fn build_router(
     // Creating a second one here would show usage the drivers never consult.
     let health_tracker = kernel.health_tracker.clone();
 
-    // Plugin gRPC dispatch (plugin.proto host services + PluginCallbacks
-    // client cache). Loopback by default; `plugin_grpc_addr = ""` disables.
-    let plugin_dispatch = {
-        let addr = kernel.config.plugin_grpc_addr.trim();
-        if addr.is_empty() {
-            None
-        } else {
-            let dispatch = Arc::new(t3rnel_runtime::plugin_grpc::PluginDispatch::new(
-                kernel.config.home_dir.clone(),
-                kernel.config.plugin_dev_mode,
-            ));
-            match addr.parse::<std::net::SocketAddr>() {
-                Ok(sock) => {
-                    let d = dispatch.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = d.serve(sock).await {
-                            tracing::error!("plugin gRPC dispatch exited: {e}");
-                        }
-                    });
-                    tracing::info!("plugin gRPC dispatch listening on {sock}");
-                    Some(dispatch)
-                }
-                Err(_) => {
-                    tracing::error!(
-                        "plugin_grpc_addr {addr:?} is not a socket address — dispatch disabled"
-                    );
-                    None
-                }
-            }
-        }
-    };
+    // Plugin host: the core side of the plugin contract. There is no listening
+    // port: the supervisor hands each confined plugin a pre-connected stream and
+    // serves the host services on it (`plugin_supervisor`).
+    let plugin_dispatch = Some(Arc::new(
+        t3rnel_runtime::plugin_grpc::PluginDispatch::new(
+            kernel.config.home_dir.clone(),
+            kernel.config.plugin_dev_mode,
+        )
+        .with_private_hosts(kernel.config.plugin_private_hosts.clone()),
+    ));
 
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
@@ -1170,7 +1149,24 @@ pub async fn build_router(
         trusted_keys: resolve_plugin_trusted_signers(&kernel.config.plugin_trusted_signers),
         dev_mode: kernel.config.plugin_dev_mode,
     };
-    let plugin_router = crate::plugin_admin::router(Arc::new(plugin_mgr), plugin_opts)
+    let plugin_mgr = Arc::new(plugin_mgr);
+    // Start every installed plugin, confined, once the daemon is up. A plugin
+    // that is refused (tampered files, revoked signer, cannot be confined) is
+    // reported and skipped; it does not stop the others.
+    let plugin_supervisor = state.plugin_dispatch.clone().map(|dispatch| {
+        let supervisor = Arc::new(t3rnel_runtime::plugin_supervisor::PluginSupervisor::new(
+            kernel.config.home_dir.clone(),
+            plugin_mgr.clone(),
+            dispatch,
+            t3rnel_runtime::plugin_supervisor::SupervisorConfig::default(),
+        ));
+        let starter = supervisor.clone();
+        tokio::spawn(async move { starter.start_all().await });
+        // Plugins have no clock of their own: the core fires their due schedule jobs.
+        supervisor.spawn_ticker();
+        supervisor
+    });
+    let plugin_router = crate::plugin_admin::router(plugin_mgr, plugin_supervisor, plugin_opts)
         .layer(axum::middleware::from_fn_with_state(
             auth_state.clone(),
             middleware::auth,
@@ -1190,6 +1186,10 @@ pub async fn build_router(
     // Same post-.with_state merge pattern and middleware stack as plugins.
     // ------------------------------------------------------------------
     let (conv_state, _local_channel) = crate::conversations::build_conversation_stack(&kernel);
+    // Plugins that declared `conversations` send and count through this service.
+    if let Some(dispatch) = &state.plugin_dispatch {
+        dispatch.attach_conversations(conv_state.service.clone());
+    }
     // Connect every linked channel account through the vault broker
     // (18 §3). Per-account failures are logged, never fatal — the local
     // dashboard adapter is always present.

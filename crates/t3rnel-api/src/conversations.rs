@@ -176,7 +176,9 @@ fn cerr(e: ConversationError) -> (StatusCode, String) {
         | ConversationError::Expired(..)
         | ConversationError::Policy(..) => StatusCode::CONFLICT,
         ConversationError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-        ConversationError::NoChannel(_) => StatusCode::BAD_GATEWAY,
+        ConversationError::NoChannel(_) | ConversationError::NotRegistered(_) => {
+            StatusCode::BAD_GATEWAY
+        }
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (code, e.to_string())

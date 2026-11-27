@@ -183,7 +183,7 @@ const SCHEME_FORBIDDEN_HEADERS: &[&str] = &[
 const MIN_REDACTABLE: usize = 4;
 
 /// IP ranges that are never valid upstreams unless the rule opts in.
-fn is_private_or_special(ip: &IpAddr) -> bool {
+pub fn is_private_or_special(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_private()

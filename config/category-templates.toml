@@ -1,0 +1,1510 @@
+# Agent Category Templates Configuration
+# This file defines default fallback chains, models, providers, and retry backoff
+# settings for each agent category in T3rnel.
+#
+# ORDERING: tier-first, provider-interleaved. Each capability tier lists the same
+# model class across several providers (e.g. GLM 5.2 via OpenRouter -> NVIDIA ->
+# Cloudflare -> MorphLLM) before dropping to a weaker tier. A single provider
+# outage or rate limit therefore costs latency, not answer quality.
+#
+# Every model ID below was validated against the provider's live /models endpoint.
+# Do not add an ID without checking it first — an unknown ID costs a full request
+# round-trip and a 404 before the chain can move on.
+#
+# Known provider caveats at time of writing:
+#   - cerebras : key returns `payment_required`; entries are kept so the chain
+#                recovers automatically once billing is restored.
+#   - gemini   : key returns `CONSUMER_SUSPENDED`; IDs mirror the google/* family
+#                OpenRouter exposes and could not be probed directly.
+#   - video    : no configured provider serves text-to-video today. The
+#                video_generation chain falls back to image + creative text models.
+
+# Retry backoff profiles
+[retry_backoff]
+model = "exponential"
+model_max_attempts = 3
+model_min_delay_ms = 1000
+model_max_delay_ms = 60000
+model_jitter = 0.2
+
+provider = "exponential"
+provider_max_attempts = 5
+provider_min_delay_ms = 2000
+provider_max_delay_ms = 300000
+provider_jitter = 0.3
+
+email = "fixed_delay"
+email_max_attempts = 10
+email_min_delay_ms = 60000
+email_max_delay_ms = 172800000
+email_jitter = 0.1
+
+generic = "exponential"
+generic_max_attempts = 3
+generic_min_delay_ms = 500
+generic_max_delay_ms = 10000
+generic_jitter = 0.2
+
+###############################################################################
+# Category-specific fallback chains (tier-first, provider-interleaved)
+###############################################################################
+
+
+###############################################################################
+# Provider catalog (drives the UI model dropdowns)
+###############################################################################
+
+[providers.cerebras]
+name = "Cerebras"
+base_url = "https://api.cerebras.ai/v1"
+api_key_env = "CEREBRAS_API_KEY"
+models = [
+    { id = "gpt-oss-120b", name = "gpt-oss-120b", tier = "paid", status = "unavailable" },
+    { id = "zai-glm-4.7", name = "zai-glm-4.7", tier = "paid", status = "unavailable" },
+    { id = "gemma-4-31b", name = "gemma-4-31b", tier = "paid", status = "unavailable" },
+]
+
+[providers.cloudflare]
+name = "Cloudflare Workers AI"
+base_url = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+api_key_env = "CLOUDFLARE_API_KEY"
+models = [
+    { id = "@cf/zai-org/glm-5.2", name = "@cf/zai-org/glm-5.2", tier = "free", status = "unavailable" },
+    { id = "@cf/moonshotai/kimi-k2.7-code", name = "@cf/moonshotai/kimi-k2.7-code", tier = "free", status = "unavailable" },
+    { id = "@cf/qwen/qwen2.5-coder-32b-instruct", name = "@cf/qwen/qwen2.5-coder-32b-instruct", tier = "free", status = "verified" },
+    { id = "@cf/openai/gpt-oss-120b", name = "@cf/openai/gpt-oss-120b", tier = "free", status = "verified" },
+    { id = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", name = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", tier = "free", status = "verified" },
+    { id = "@cf/zai-org/glm-4.7-flash", name = "@cf/zai-org/glm-4.7-flash", tier = "free", status = "verified" },
+    { id = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", name = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", tier = "free", status = "verified" },
+    { id = "@cf/qwen/qwq-32b", name = "@cf/qwen/qwq-32b", tier = "free", status = "verified" },
+    { id = "@cf/moonshotai/kimi-k2.6", name = "@cf/moonshotai/kimi-k2.6", tier = "free", status = "unavailable" },
+    { id = "@cf/nvidia/nemotron-3-120b-a12b", name = "@cf/nvidia/nemotron-3-120b-a12b", tier = "free", status = "verified" },
+    { id = "@cf/meta/m2m100-1.2b", name = "@cf/meta/m2m100-1.2b", tier = "free", status = "unprobed" },
+    { id = "@cf/ai4bharat/indictrans2-en-indic-1B", name = "@cf/ai4bharat/indictrans2-en-indic-1B", tier = "free", status = "unprobed" },
+    { id = "@cf/black-forest-labs/flux-2-dev", name = "@cf/black-forest-labs/flux-2-dev", tier = "free", status = "unprobed" },
+    { id = "@cf/black-forest-labs/flux-2-klein-9b", name = "@cf/black-forest-labs/flux-2-klein-9b", tier = "free", status = "unprobed" },
+    { id = "@cf/leonardo/lucid-origin", name = "@cf/leonardo/lucid-origin", tier = "free", status = "unprobed" },
+    { id = "@cf/leonardo/phoenix-1.0", name = "@cf/leonardo/phoenix-1.0", tier = "free", status = "unprobed" },
+    { id = "@cf/black-forest-labs/flux-1-schnell", name = "@cf/black-forest-labs/flux-1-schnell", tier = "free", status = "unprobed" },
+    { id = "@cf/stabilityai/stable-diffusion-xl-base-1.0", name = "@cf/stabilityai/stable-diffusion-xl-base-1.0", tier = "free", status = "unprobed" },
+    { id = "@cf/bytedance/stable-diffusion-xl-lightning", name = "@cf/bytedance/stable-diffusion-xl-lightning", tier = "free", status = "unprobed" },
+    { id = "@cf/lykon/dreamshaper-8-lcm", name = "@cf/lykon/dreamshaper-8-lcm", tier = "free", status = "unprobed" },
+    { id = "@cf/meta/llama-3.2-11b-vision-instruct", name = "@cf/meta/llama-3.2-11b-vision-instruct", tier = "free", status = "unavailable" },
+    { id = "@cf/moondream/moondream3.1-9B-A2B", name = "@cf/moondream/moondream3.1-9B-A2B", tier = "free", status = "verified" },
+    { id = "@cf/llava-hf/llava-1.5-7b-hf", name = "@cf/llava-hf/llava-1.5-7b-hf", tier = "free", status = "unavailable" },
+    { id = "@cf/openai/whisper-large-v3-turbo", name = "@cf/openai/whisper-large-v3-turbo", tier = "free", status = "unprobed" },
+    { id = "@cf/deepgram/nova-3", name = "@cf/deepgram/nova-3", tier = "free", status = "unavailable" },
+    { id = "@cf/openai/whisper", name = "@cf/openai/whisper", tier = "free", status = "unprobed" },
+    { id = "@cf/deepgram/flux", name = "@cf/deepgram/flux", tier = "free", status = "unprobed" },
+    { id = "@cf/openai/whisper-tiny-en", name = "@cf/openai/whisper-tiny-en", tier = "free", status = "unprobed" },
+    { id = "@cf/deepgram/aura-2-en", name = "@cf/deepgram/aura-2-en", tier = "free", status = "unprobed" },
+    { id = "@cf/deepgram/aura-1", name = "@cf/deepgram/aura-1", tier = "free", status = "unprobed" },
+    { id = "@cf/myshell-ai/melotts", name = "@cf/myshell-ai/melotts", tier = "free", status = "unprobed" },
+    { id = "@cf/deepgram/aura-2-es", name = "@cf/deepgram/aura-2-es", tier = "free", status = "unprobed" },
+    { id = "@cf/baai/bge-m3", name = "@cf/baai/bge-m3", tier = "free", status = "unavailable" },
+    { id = "@cf/qwen/qwen3-embedding-0.6b", name = "@cf/qwen/qwen3-embedding-0.6b", tier = "free", status = "unprobed" },
+    { id = "@cf/google/embeddinggemma-300m", name = "@cf/google/embeddinggemma-300m", tier = "free", status = "unprobed" },
+    { id = "@cf/baai/bge-large-en-v1.5", name = "@cf/baai/bge-large-en-v1.5", tier = "free", status = "unavailable" },
+    { id = "@cf/baai/bge-base-en-v1.5", name = "@cf/baai/bge-base-en-v1.5", tier = "free", status = "unavailable" },
+    { id = "@cf/pfnet/plamo-embedding-1b", name = "@cf/pfnet/plamo-embedding-1b", tier = "free", status = "unprobed" },
+    { id = "@cf/baai/bge-small-en-v1.5", name = "@cf/baai/bge-small-en-v1.5", tier = "free", status = "unavailable" },
+    { id = "@cf/baai/bge-reranker-base", name = "@cf/baai/bge-reranker-base", tier = "free", status = "unprobed" },
+    { id = "@cf/huggingface/distilbert-sst-2-int8", name = "@cf/huggingface/distilbert-sst-2-int8", tier = "free", status = "unprobed" },
+]
+
+[providers.gemini]
+name = "Google Gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+api_key_env = "GEMINI_API_KEY"
+models = [
+    { id = "gemini-3.1-pro-preview", name = "gemini-3.1-pro-preview", tier = "paid", status = "unavailable" },
+    { id = "gemini-2.5-pro", name = "gemini-2.5-pro", tier = "paid", status = "unavailable" },
+    { id = "gemini-3.6-flash", name = "gemini-3.6-flash", tier = "free", status = "unavailable" },
+    { id = "gemini-3.5-flash", name = "gemini-3.5-flash", tier = "free", status = "verified" },
+    { id = "gemini-3-flash-preview", name = "gemini-3-flash-preview", tier = "free", status = "verified" },
+    { id = "gemini-2.5-flash", name = "gemini-2.5-flash", tier = "free", status = "verified" },
+    { id = "gemini-3.1-flash-lite", name = "gemini-3.1-flash-lite", tier = "free", status = "verified" },
+    { id = "gemini-3.1-flash-image", name = "gemini-3.1-flash-image", tier = "free", status = "unprobed" },
+    { id = "gemini-2.5-flash-image", name = "gemini-2.5-flash-image", tier = "free", status = "unprobed" },
+    { id = "gemini-3-pro-image", name = "gemini-3-pro-image", tier = "paid", status = "unprobed" },
+]
+
+[providers.groq]
+name = "Groq"
+base_url = "https://api.groq.com/openai/v1"
+api_key_env = "GROQ_API_KEY"
+models = [
+    { id = "openai/gpt-oss-120b", name = "openai/gpt-oss-120b", tier = "free", status = "verified" },
+    { id = "llama-3.3-70b-versatile", name = "llama-3.3-70b-versatile", tier = "free", status = "verified" },
+    { id = "llama-3.1-8b-instant", name = "llama-3.1-8b-instant", tier = "free", status = "verified" },
+    { id = "whisper-large-v3-turbo", name = "whisper-large-v3-turbo", tier = "free", status = "unprobed" },
+    { id = "whisper-large-v3", name = "whisper-large-v3", tier = "free", status = "unprobed" },
+    { id = "canopylabs/orpheus-v1-english", name = "canopylabs/orpheus-v1-english", tier = "free", status = "unprobed" },
+    { id = "canopylabs/orpheus-arabic-saudi", name = "canopylabs/orpheus-arabic-saudi", tier = "free", status = "unprobed" },
+]
+
+[providers.mistral]
+name = "Mistral AI"
+base_url = "https://api.mistral.ai/v1"
+api_key_env = "MISTRAL_API_KEY"
+models = [
+    { id = "codestral-latest", name = "codestral-latest", tier = "free", status = "verified" },
+    { id = "devstral-medium-latest", name = "devstral-medium-latest", tier = "free", status = "verified" },
+    { id = "mistral-large-latest", name = "mistral-large-latest", tier = "free", status = "verified" },
+    { id = "mistral-medium-latest", name = "mistral-medium-latest", tier = "free", status = "verified" },
+    { id = "mistral-small-latest", name = "mistral-small-latest", tier = "free", status = "verified" },
+    { id = "mistral-ocr-latest", name = "mistral-ocr-latest", tier = "free", status = "unavailable" },
+    { id = "mistral-embed", name = "mistral-embed", tier = "free", status = "unprobed" },
+]
+
+[providers.morphllm]
+name = "MorphLLM"
+base_url = "https://api.morphllm.com/v1"
+api_key_env = "MORPHLLM_API_KEY"
+models = [
+    { id = "morph-glm52-744b", name = "morph-glm52-744b", tier = "paid", status = "unavailable" },
+    { id = "morph-kimik3-fast", name = "morph-kimik3-fast", tier = "paid", status = "unavailable" },
+    { id = "morph-qwen36-27b", name = "morph-qwen36-27b", tier = "paid", status = "unavailable" },
+    { id = "morph-dsv4flash", name = "morph-dsv4flash", tier = "paid", status = "unavailable" },
+    { id = "morph-kimik3", name = "morph-kimik3", tier = "paid", status = "unavailable" },
+    { id = "morph-computer-use-v1", name = "morph-computer-use-v1", tier = "paid", status = "unavailable" },
+    { id = "morph-minimax3-428b", name = "morph-minimax3-428b", tier = "paid", status = "unavailable" },
+]
+
+[providers.nvidia]
+name = "NVIDIA NIM"
+base_url = "https://integrate.api.nvidia.com/v1"
+api_key_env = "NVIDIA_API_KEY"
+models = [
+    { id = "z-ai/glm-5.2", name = "z-ai/glm-5.2", tier = "free", status = "verified" },
+    { id = "deepseek-ai/deepseek-v4-pro", name = "deepseek-ai/deepseek-v4-pro", tier = "free", status = "unavailable" },
+    { id = "deepseek-ai/deepseek-v4-flash", name = "deepseek-ai/deepseek-v4-flash", tier = "free", status = "unavailable" },
+    { id = "mistralai/codestral-22b-instruct-v0.1", name = "mistralai/codestral-22b-instruct-v0.1", tier = "free", status = "unavailable" },
+    { id = "openai/gpt-oss-120b", name = "openai/gpt-oss-120b", tier = "free", status = "verified" },
+    { id = "meta/llama-3.3-70b-instruct", name = "meta/llama-3.3-70b-instruct", tier = "free", status = "unavailable" },
+    { id = "moonshotai/kimi-k2.6", name = "moonshotai/kimi-k2.6", tier = "free", status = "unavailable" },
+    { id = "nvidia/nemotron-3-super-120b-a12b", name = "nvidia/nemotron-3-super-120b-a12b", tier = "free", status = "verified" },
+    { id = "nvidia/nemotron-3-ultra-550b-a55b", name = "nvidia/nemotron-3-ultra-550b-a55b", tier = "free", status = "verified" },
+    { id = "nvidia/cosmos-reason2-8b", name = "nvidia/cosmos-reason2-8b", tier = "free", status = "unavailable" },
+    { id = "writer/palmyra-creative-122b", name = "writer/palmyra-creative-122b", tier = "free", status = "unavailable" },
+    { id = "minimaxai/minimax-m3", name = "minimaxai/minimax-m3", tier = "free", status = "unavailable" },
+    { id = "stepfun-ai/step-3.7-flash", name = "stepfun-ai/step-3.7-flash", tier = "free", status = "verified" },
+    { id = "nvidia/riva-translate-4b-instruct-v2", name = "nvidia/riva-translate-4b-instruct-v2", tier = "free", status = "verified" },
+    { id = "nvidia/riva-translate-4b-instruct-v1.1", name = "nvidia/riva-translate-4b-instruct-v1.1", tier = "free", status = "verified" },
+    { id = "nvidia/riva-translate-4b-instruct", name = "nvidia/riva-translate-4b-instruct", tier = "free", status = "unavailable" },
+    { id = "google/diffusiongemma-26b-a4b-it", name = "google/diffusiongemma-26b-a4b-it", tier = "free", status = "verified" },
+    { id = "meta/llama-3.2-90b-vision-instruct", name = "meta/llama-3.2-90b-vision-instruct", tier = "free", status = "verified" },
+    { id = "nvidia/nemotron-nano-12b-v2-vl", name = "nvidia/nemotron-nano-12b-v2-vl", tier = "free", status = "verified" },
+    { id = "writer/palmyra-fin-70b-32k", name = "writer/palmyra-fin-70b-32k", tier = "free", status = "unavailable" },
+    { id = "nvidia/llama-3.1-nemotron-ultra-253b-v1", name = "nvidia/llama-3.1-nemotron-ultra-253b-v1", tier = "free", status = "unavailable" },
+    { id = "nvidia/nemotron-parse", name = "nvidia/nemotron-parse", tier = "free", status = "unprobed" },
+    { id = "nvidia/nemoretriever-parse", name = "nvidia/nemoretriever-parse", tier = "free", status = "unprobed" },
+    { id = "google/deplot", name = "google/deplot", tier = "free", status = "unprobed" },
+    { id = "baai/bge-m3", name = "baai/bge-m3", tier = "free", status = "unavailable" },
+    { id = "nvidia/nv-embedqa-e5-v5", name = "nvidia/nv-embedqa-e5-v5", tier = "free", status = "unprobed" },
+    { id = "nvidia/nemotron-3-embed-1b", name = "nvidia/nemotron-3-embed-1b", tier = "free", status = "unprobed" },
+    { id = "snowflake/arctic-embed-l", name = "snowflake/arctic-embed-l", tier = "free", status = "unprobed" },
+    { id = "nvidia/nv-embed-v1", name = "nvidia/nv-embed-v1", tier = "free", status = "unprobed" },
+    { id = "nvidia/llama-3.2-nv-embedqa-1b-v1", name = "nvidia/llama-3.2-nv-embedqa-1b-v1", tier = "free", status = "unprobed" },
+    { id = "nvidia/llama-nemotron-embed-1b-v2", name = "nvidia/llama-nemotron-embed-1b-v2", tier = "free", status = "unprobed" },
+    { id = "nvidia/llama-nemotron-embed-vl-1b-v2", name = "nvidia/llama-nemotron-embed-vl-1b-v2", tier = "free", status = "unprobed" },
+    { id = "nvidia/nv-embedqa-mistral-7b-v2", name = "nvidia/nv-embedqa-mistral-7b-v2", tier = "free", status = "unprobed" },
+]
+
+[providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+models = [
+    { id = "z-ai/glm-5.2", name = "z-ai/glm-5.2", tier = "paid", status = "unavailable" },
+    { id = "moonshotai/kimi-k2.7-code", name = "moonshotai/kimi-k2.7-code", tier = "paid", status = "unavailable" },
+    { id = "qwen/qwen3-coder-plus", name = "qwen/qwen3-coder-plus", tier = "paid", status = "unavailable" },
+    { id = "qwen/qwen3-coder", name = "qwen/qwen3-coder", tier = "paid", status = "unavailable" },
+    { id = "deepseek/deepseek-v4-pro", name = "deepseek/deepseek-v4-pro", tier = "paid", status = "unavailable" },
+    { id = "deepseek/deepseek-v4-flash", name = "deepseek/deepseek-v4-flash", tier = "paid", status = "unavailable" },
+    { id = "meta-llama/llama-3.3-70b-instruct", name = "meta-llama/llama-3.3-70b-instruct", tier = "paid", status = "unavailable" },
+    { id = "qwen/qwen3-235b-a22b-thinking-2507", name = "qwen/qwen3-235b-a22b-thinking-2507", tier = "paid", status = "unavailable" },
+    { id = "deepseek/deepseek-r1", name = "deepseek/deepseek-r1", tier = "paid", status = "unavailable" },
+    { id = "moonshotai/kimi-k3", name = "moonshotai/kimi-k3", tier = "paid", status = "unavailable" },
+    { id = "moonshotai/kimi-k2.6", name = "moonshotai/kimi-k2.6", tier = "paid", status = "unavailable" },
+    { id = "nvidia/nemotron-3-ultra-550b-a55b:free", name = "nvidia/nemotron-3-ultra-550b-a55b:free", tier = "free", status = "unavailable" },
+    { id = "nvidia/nemotron-3-super-120b-a12b:free", name = "nvidia/nemotron-3-super-120b-a12b:free", tier = "free", status = "unavailable" },
+    { id = "google/gemini-3.1-pro-preview", name = "google/gemini-3.1-pro-preview", tier = "paid", status = "unavailable" },
+    { id = "google/gemini-3.6-flash", name = "google/gemini-3.6-flash", tier = "paid", status = "unavailable" },
+    { id = "google/gemini-3.5-flash", name = "google/gemini-3.5-flash", tier = "paid", status = "unavailable" },
+    { id = "qwen/qwen3-vl-235b-a22b-instruct", name = "qwen/qwen3-vl-235b-a22b-instruct", tier = "paid", status = "unavailable" },
+    { id = "z-ai/glm-4.6v", name = "z-ai/glm-4.6v", tier = "paid", status = "unavailable" },
+    { id = "google/gemini-3-pro-image", name = "google/gemini-3-pro-image", tier = "paid", status = "unprobed" },
+    { id = "openai/gpt-5.4-image-2", name = "openai/gpt-5.4-image-2", tier = "paid", status = "unprobed" },
+    { id = "google/gemini-3.1-flash-image", name = "google/gemini-3.1-flash-image", tier = "paid", status = "unprobed" },
+    { id = "openai/gpt-5-image", name = "openai/gpt-5-image", tier = "paid", status = "unprobed" },
+    { id = "google/gemini-2.5-flash-image", name = "google/gemini-2.5-flash-image", tier = "paid", status = "unprobed" },
+    { id = "qwen/qwen3-vl-32b-instruct", name = "qwen/qwen3-vl-32b-instruct", tier = "paid", status = "unavailable" },
+    { id = "google/lyria-3-pro-preview", name = "google/lyria-3-pro-preview", tier = "paid", status = "unprobed" },
+    { id = "google/lyria-3-clip-preview", name = "google/lyria-3-clip-preview", tier = "paid", status = "unprobed" },
+]
+
+[categories.coding]
+description = "Code generation, debugging, review, software engineering and testing agents"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.analysis]
+description = "Data analysis, reasoning, BI and research agents"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.research]
+description = "Deep research, literature review and synthesis agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.browser]
+description = "Browser automation, scraping and web navigation agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.orchestration]
+description = "Multi-agent orchestration, routing and delegation agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.planning]
+description = "Task decomposition, planning and scheduling agents"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.computer_use]
+description = "Desktop and GUI control agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.social_media]
+description = "Social posting, community management and engagement agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.writing]
+description = "Long-form writing, copywriting and editorial agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.translation]
+description = "Machine translation and localization agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/riva-translate-4b-instruct-v2", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/riva-translate-4b-instruct-v1.1", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/m2m100-1.2b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/ai4bharat/indictrans2-en-indic-1B", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.image_generation]
+description = "Text-to-image generation agents"
+fallback_chain = [
+    { provider = "nvidia", model = "google/diffusiongemma-26b-a4b-it", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-dev", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-klein-9b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/lucid-origin", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/phoenix-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-1-schnell", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/stabilityai/stable-diffusion-xl-base-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/bytedance/stable-diffusion-xl-lightning", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/lykon/dreamshaper-8-lcm", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.image_understanding]
+description = "Vision, OCR-lite and image reasoning agents"
+fallback_chain = [
+    { provider = "nvidia", model = "meta/llama-3.2-90b-vision-instruct", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "meta/llama-3.2-90b-vision-instruct", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/moondream/moondream3.1-9B-A2B", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.graphic_design]
+description = "Design, layout and visual asset generation agents"
+fallback_chain = [
+    { provider = "nvidia", model = "google/diffusiongemma-26b-a4b-it", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-dev", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-klein-9b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/lucid-origin", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/phoenix-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-1-schnell", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/stabilityai/stable-diffusion-xl-base-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/bytedance/stable-diffusion-xl-lightning", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/lykon/dreamshaper-8-lcm", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.video_generation]
+description = "Text-to-video generation agents (see note: no configured provider serves video today)"
+fallback_chain = [
+    { provider = "nvidia", model = "google/diffusiongemma-26b-a4b-it", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-dev", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-klein-9b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/lucid-origin", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/phoenix-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-1-schnell", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/stabilityai/stable-diffusion-xl-base-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/bytedance/stable-diffusion-xl-lightning", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/lykon/dreamshaper-8-lcm", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.video_understanding]
+description = "Video analysis and frame reasoning agents"
+fallback_chain = [
+    { provider = "nvidia", model = "meta/llama-3.2-90b-vision-instruct", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "meta/llama-3.2-90b-vision-instruct", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/moondream/moondream3.1-9B-A2B", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.speech_to_text]
+description = "Transcription and speech recognition agents"
+fallback_chain = [
+    { provider = "groq", model = "whisper-large-v3-turbo", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/whisper-large-v3-turbo", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "whisper-large-v3", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/whisper", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/deepgram/flux", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/whisper-tiny-en", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "generic"
+recovery_strategy = "exponential_backoff"
+
+[categories.text_to_speech]
+description = "Speech synthesis and voice agents"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepgram/aura-2-en", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/deepgram/aura-1", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/myshell-ai/melotts", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/deepgram/aura-2-es", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "canopylabs/orpheus-v1-english", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "groq", model = "canopylabs/orpheus-arabic-saudi", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "generic"
+recovery_strategy = "exponential_backoff"
+
+[categories.music_generation]
+description = "Music composition and generation agents"
+fallback_chain = [
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.audio_generation]
+description = "Sound effect and general audio generation agents"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepgram/aura-2-en", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/deepgram/aura-1", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/myshell-ai/melotts", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/deepgram/aura-2-es", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "canopylabs/orpheus-v1-english", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "groq", model = "canopylabs/orpheus-arabic-saudi", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "generic"
+recovery_strategy = "exponential_backoff"
+
+[categories.nft_generation]
+description = "NFT artwork generation — MUST use real generative image models, never script-drawn SVG"
+fallback_chain = [
+    { provider = "nvidia", model = "google/diffusiongemma-26b-a4b-it", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-dev", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-klein-9b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/lucid-origin", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/phoenix-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-1-schnell", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/stabilityai/stable-diffusion-xl-base-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/bytedance/stable-diffusion-xl-lightning", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/lykon/dreamshaper-8-lcm", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.autonomous_trading]
+description = "Autonomous trading and execution agents"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.quantitative_analysis]
+description = "Quantitative research and backtesting agents"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.market_watcher]
+description = "Market monitoring and alerting agents"
+fallback_chain = [
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.document_ai]
+description = "Document parsing, extraction and OCR agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-parse", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-parse", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.embeddings]
+description = "Text embedding and vector generation agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-embed-1b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nv-embedqa-mistral-7b-v2", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwen3-embedding-0.6b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-embed-1b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/google/embeddinggemma-300m", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "snowflake/arctic-embed-l", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nv-embedqa-mistral-7b-v2", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/llama-3.2-nv-embedqa-1b-v1", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/pfnet/plamo-embedding-1b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "generic"
+recovery_strategy = "exponential_backoff"
+
+[categories.reranking]
+description = "Search result reranking agents"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/baai/bge-reranker-base", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/llama-nemotron-embed-vl-1b-v2", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/llama-nemotron-embed-vl-1b-v2", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nv-embedqa-mistral-7b-v2", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/huggingface/distilbert-sst-2-int8", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "generic"
+recovery_strategy = "exponential_backoff"
+
+[categories.long_context]
+description = "Very large context window agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.memory]
+description = "Memory consolidation, recall and summarization agents"
+fallback_chain = [
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.tool_use]
+description = "Tool-calling and function-execution heavy agents"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.autonomous_control]
+description = "Fully autonomous control-loop agents"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.general]
+description = "General agents (inherits the orchestration capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.marketing]
+description = "Marketing agents (inherits the social_media capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.creative]
+description = "Creative agents (inherits the writing capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.monitoring]
+description = "Monitoring agents (inherits the market_watcher capability chain)"
+fallback_chain = [
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.testing]
+description = "Testing agents (inherits the coding capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.qa_engineer]
+description = "Qa Engineer agents (inherits the coding capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.test_engineer]
+description = "Test Engineer agents (inherits the coding capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.code_review]
+description = "Code Review agents (inherits the coding capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.debugger]
+description = "Debugger agents (inherits the coding capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.backend_builder]
+description = "Backend Builder agents (inherits the coding capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.frontend_builder]
+description = "Frontend Builder agents (inherits the coding capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.devops]
+description = "Devops agents (inherits the coding capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.architect]
+description = "Architect agents (inherits the planning capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.architecture]
+description = "Architecture agents (inherits the planning capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.project_management]
+description = "Project Management agents (inherits the planning capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.management]
+description = "Management agents (inherits the planning capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.documentation]
+description = "Documentation agents (inherits the writing capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.education]
+description = "Education agents (inherits the writing capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.news_curation]
+description = "News Curation agents (inherits the research capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.business_research]
+description = "Business Research agents (inherits the research capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.legal]
+description = "Legal agents (inherits the research capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.health]
+description = "Health agents (inherits the research capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.security]
+description = "Security agents (inherits the analysis capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.finance]
+description = "Finance agents (inherits the quantitative_analysis capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.personal_finance]
+description = "Personal Finance agents (inherits the quantitative_analysis capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.trading]
+description = "Trading agents (inherits the autonomous_trading capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.jobs]
+description = "Jobs agents (inherits the writing capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.recruitment]
+description = "Recruitment agents (inherits the writing capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.hr]
+description = "Hr agents (inherits the writing capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.sales]
+description = "Sales agents (inherits the social_media capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.customer_support]
+description = "Customer Support agents (inherits the social_media capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.support]
+description = "Support agents (inherits the social_media capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.email]
+description = "Email agents (inherits the writing capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.operations]
+description = "Operations agents (inherits the tool_use capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.productivity]
+description = "Productivity agents (inherits the tool_use capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.meeting_assistant]
+description = "Meeting Assistant agents (inherits the tool_use capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.travel]
+description = "Travel agents (inherits the tool_use capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwen2.5-coder-32b-instruct", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.home_automation]
+description = "Home Automation agents (inherits the autonomous_control capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.home_pilot]
+description = "Home Pilot agents (inherits the autonomous_control capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.smart_home]
+description = "Smart Home agents (inherits the autonomous_control capability chain)"
+fallback_chain = [
+    { provider = "cloudflare", model = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/qwen/qwq-32b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/nvidia/nemotron-3-120b-a12b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "openai/gpt-oss-120b", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/openai/gpt-oss-120b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "nvidia/nemotron-3-ultra-550b-a55b", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.3-70b-versatile", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "groq", model = "llama-3.1-8b-instant", api_key_env = "GROQ_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/zai-org/glm-4.7-flash", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.media]
+description = "Media agents (inherits the graphic_design capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "google/diffusiongemma-26b-a4b-it", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-dev", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-klein-9b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/lucid-origin", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/phoenix-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-1-schnell", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/stabilityai/stable-diffusion-xl-base-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/bytedance/stable-diffusion-xl-lightning", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/lykon/dreamshaper-8-lcm", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.design]
+description = "Design agents (inherits the graphic_design capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "google/diffusiongemma-26b-a4b-it", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-dev", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-klein-9b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/lucid-origin", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/phoenix-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-1-schnell", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/stabilityai/stable-diffusion-xl-base-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/bytedance/stable-diffusion-xl-lightning", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/lykon/dreamshaper-8-lcm", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.ui_ux_design]
+description = "Ui Ux Design agents (inherits the graphic_design capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "google/diffusiongemma-26b-a4b-it", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-dev", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-2-klein-9b", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/lucid-origin", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/leonardo/phoenix-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/black-forest-labs/flux-1-schnell", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/stabilityai/stable-diffusion-xl-base-1.0", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/bytedance/stable-diffusion-xl-lightning", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/lykon/dreamshaper-8-lcm", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"
+
+[categories.voice_video]
+description = "Voice Video agents (inherits the video_understanding capability chain)"
+fallback_chain = [
+    { provider = "nvidia", model = "meta/llama-3.2-90b-vision-instruct", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "nvidia", model = "meta/llama-3.2-90b-vision-instruct", api_key_env = "NVIDIA_API_KEY", tier = "free" },
+    { provider = "cloudflare", model = "@cf/moondream/moondream3.1-9B-A2B", api_key_env = "CLOUDFLARE_API_KEY", tier = "free" },
+    { provider = "freellm", model = "auto", api_key_env = "FREELLM_API_KEY" },
+]
+retry_profile = "model"
+recovery_strategy = "exponential_backoff"

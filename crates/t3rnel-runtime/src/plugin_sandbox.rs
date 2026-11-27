@@ -63,6 +63,40 @@ pub struct SandboxPolicy {
     /// descriptor above 2 is closed on exec, so nothing the daemon had open —
     /// a listening socket, the vault file — reaches the plugin.
     pub keep_fds: Vec<i32>,
+    /// Descriptors to hand the plugin, as `(descriptor in this process, number
+    /// the plugin sees)`. The plugin always finds its host streams at the same
+    /// fixed numbers whatever the daemon's own numbering is. The target numbers
+    /// are kept automatically.
+    pub inherit: Vec<(i32, i32)>,
+    /// Hard resource limits the plugin cannot raise. `None` applies none (tests).
+    pub limits: Option<ProcessLimits>,
+}
+
+/// Hard per-process limits applied with `setrlimit` before the plugin runs.
+/// They hold even where `systemd-run` scopes are unavailable, and a process
+/// cannot raise a hard limit it did not set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessLimits {
+    /// Largest core dump in bytes. **Zero**: a core file would contain the
+    /// plugin's memory, which can hold a scoped token.
+    pub core_bytes: u64,
+    /// Most open files.
+    pub open_files: u64,
+    /// Largest single file the plugin may write.
+    pub file_bytes: u64,
+    /// Largest address space.
+    pub address_space_bytes: u64,
+}
+
+impl Default for ProcessLimits {
+    fn default() -> Self {
+        ProcessLimits {
+            core_bytes: 0,
+            open_files: 256,
+            file_bytes: 1024 * 1024 * 1024,
+            address_space_bytes: 4 * 1024 * 1024 * 1024,
+        }
+    }
 }
 
 impl SandboxPolicy {
@@ -85,6 +119,8 @@ impl SandboxPolicy {
             },
             read_only_dirs,
             keep_fds: Vec::new(),
+            inherit: Vec::new(),
+            limits: Some(ProcessLimits::default()),
         }
     }
 }
@@ -161,7 +197,13 @@ fn probe_seccomp() -> Result<(), SandboxError> {
 /// `no_new_privs` must precede the seccomp filter, and both must precede
 /// `exec`. Irreversible — call only in a child between fork and exec.
 pub fn apply_confinement(policy: &SandboxPolicy) -> Result<(), SandboxError> {
-    close_inherited_fds(&policy.keep_fds)?;
+    place_inherited(&policy.inherit)?;
+    let mut keep = policy.keep_fds.clone();
+    keep.extend(policy.inherit.iter().map(|(_, to)| *to));
+    close_inherited_fds(&keep)?;
+    if let Some(limits) = &policy.limits {
+        apply_rlimits(limits)?;
+    }
     apply_no_new_privs()?;
     apply_landlock(policy)?;
     apply_seccomp()?;
@@ -198,6 +240,79 @@ pub fn confined_command<'a>(
 // ---------------------------------------------------------------------------
 // inherited descriptors
 // ---------------------------------------------------------------------------
+
+/// Put each `(from, to)` descriptor at its fixed number in this (child)
+/// process. Every source is first copied above all the targets, so no copy can
+/// overwrite a source that is still needed, then copied down and the temporary
+/// closed. `dup2` clears close-on-exec on the target, which is what lets the
+/// plugin inherit it.
+#[cfg(target_os = "linux")]
+fn place_inherited(map: &[(i32, i32)]) -> Result<(), SandboxError> {
+    if map.is_empty() {
+        return Ok(());
+    }
+    let floor = map.iter().map(|(_, to)| *to).max().unwrap_or(2).max(2) + 1;
+    let mut temps: Vec<i32> = Vec::with_capacity(map.len());
+    for (from, _) in map {
+        // SAFETY: fcntl with F_DUPFD takes scalar arguments.
+        let tmp = unsafe { libc::fcntl(*from, libc::F_DUPFD, floor) };
+        if tmp < 0 {
+            return Err(SandboxError::Failed(format!(
+                "cannot duplicate descriptor {from}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        temps.push(tmp);
+    }
+    for ((_, to), tmp) in map.iter().zip(&temps) {
+        // SAFETY: dup2 takes scalar arguments.
+        if unsafe { libc::dup2(*tmp, *to) } < 0 {
+            return Err(SandboxError::Failed(format!(
+                "cannot place descriptor at {to}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+    }
+    for tmp in temps {
+        // SAFETY: closing a descriptor this function opened.
+        unsafe { libc::close(tmp) };
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn place_inherited(_: &[(i32, i32)]) -> Result<(), SandboxError> {
+    Err(SandboxError::UnsupportedPlatform)
+}
+
+/// Set the hard limits. Soft and hard are set together, so the plugin cannot raise them.
+#[cfg(target_os = "linux")]
+fn apply_rlimits(l: &ProcessLimits) -> Result<(), SandboxError> {
+    let set = |resource: libc::__rlimit_resource_t, value: u64, name: &str| -> Result<(), SandboxError> {
+        let rl = libc::rlimit {
+            rlim_cur: value as libc::rlim_t,
+            rlim_max: value as libc::rlim_t,
+        };
+        // SAFETY: setrlimit reads a valid struct.
+        if unsafe { libc::setrlimit(resource, &rl) } != 0 {
+            return Err(SandboxError::Failed(format!(
+                "setrlimit {name}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    };
+    set(libc::RLIMIT_CORE, l.core_bytes, "core")?;
+    set(libc::RLIMIT_NOFILE, l.open_files, "nofile")?;
+    set(libc::RLIMIT_FSIZE, l.file_bytes, "fsize")?;
+    set(libc::RLIMIT_AS, l.address_space_bytes, "as")?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_rlimits(_: &ProcessLimits) -> Result<(), SandboxError> {
+    Err(SandboxError::UnsupportedPlatform)
+}
 
 /// Mark every descriptor above 2 close-on-exec except `keep`. They are marked
 /// rather than closed so the standard library's exec-error pipe keeps working;
@@ -1184,18 +1299,23 @@ mod tests {
             read_write_dirs: vec![dir.path().to_path_buf()],
             read_only_dirs: system_read_only(),
             keep_fds: vec![],
+            ..Default::default()
         };
-        let out = run_confined(&closed, &[&format!("echo leaked >&{w}")]);
+        // The shell can only name descriptors 0-9, so the pipe's write end is
+        // handed over as descriptor 7 (its own number may be higher when many
+        // tests run at once). In the daemon's own descriptor table it is open
+        // too, but nothing may carry it into the child except the policy.
+        let out = run_confined(&closed, &["echo leaked >&7"]);
         assert!(
             !out.status.success(),
-            "descriptor {w} must not exist in the child: {out:?}"
+            "descriptor 7 must not exist in the child unless the policy gives it: {out:?}"
         );
 
         let kept = SandboxPolicy {
-            keep_fds: vec![w],
+            inherit: vec![(w, 7)],
             ..closed
         };
-        let out = run_confined(&kept, &[&format!("echo delivered >&{w}")]);
+        let out = run_confined(&kept, &["echo delivered >&7"]);
         assert!(
             out.status.success(),
             "{}",
@@ -1254,6 +1374,75 @@ mod tests {
         let out = run_confined(&policy, &["cat /etc/passwd"]);
         assert!(!out.status.success(), "/etc/passwd must not be readable");
     }
+
+    // ---- fixed descriptors and hard limits ---------------------------------------------------------
+    #[test]
+    fn inherited_descriptors_appear_at_the_numbers_the_policy_names() {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (r, w) = (fds[0], fds[1]);
+        let dir = tempfile::tempdir().unwrap();
+        let policy = SandboxPolicy {
+            read_write_dirs: vec![dir.path().to_path_buf()],
+            read_only_dirs: system_read_only(),
+            // The daemon's own number for the write end is whatever pipe() returned; the plugin sees 3.
+            inherit: vec![(w, 3)],
+            ..Default::default()
+        };
+        let out = run_confined(&policy, &["echo from-the-plugin >&3"]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        unsafe { libc::close(w) };
+        let mut buf = [0u8; 64];
+        let n = unsafe { libc::read(r, buf.as_mut_ptr().cast(), buf.len()) };
+        assert_eq!(String::from_utf8_lossy(&buf[..n.max(0) as usize]).trim(), "from-the-plugin");
+        unsafe { libc::close(r) };
+    }
+
+    #[test]
+    fn two_inherited_descriptors_whose_numbers_cross_do_not_overwrite_each_other() {
+        // Parent numbers chosen so a naive dup2(a,b); dup2(b,a) would lose one.
+        let mut p1 = [0i32; 2];
+        let mut p2 = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(p1.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { libc::pipe(p2.as_mut_ptr()) }, 0);
+        let dir = tempfile::tempdir().unwrap();
+        let policy = SandboxPolicy {
+            read_write_dirs: vec![dir.path().to_path_buf()],
+            read_only_dirs: system_read_only(),
+            inherit: vec![(p1[1], 4), (p2[1], 3)],
+            ..Default::default()
+        };
+        let out = run_confined(&policy, &["echo one >&4; echo two >&3"]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let read = |fd: i32| {
+            let mut buf = [0u8; 16];
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+            String::from_utf8_lossy(&buf[..n.max(0) as usize]).trim().to_string()
+        };
+        unsafe { libc::close(p1[1]); libc::close(p2[1]) };
+        assert_eq!(read(p1[0]), "one");
+        assert_eq!(read(p2[0]), "two");
+        unsafe { libc::close(p1[0]); libc::close(p2[0]) };
+    }
+
+    #[test]
+    fn a_confined_plugin_has_no_core_dumps_and_bounded_files_it_cannot_raise() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = SandboxPolicy {
+            read_write_dirs: vec![dir.path().to_path_buf()],
+            read_only_dirs: system_read_only(),
+            limits: Some(ProcessLimits { open_files: 64, ..ProcessLimits::default() }),
+            ..Default::default()
+        };
+        let out = run_confined(&policy, &["ulimit -c; ulimit -n; ulimit -Hn; ulimit -n 9999 2>&1 | head -1"]);
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "0", "core dumps must be off: {text}");
+        assert_eq!(lines[1], "64", "soft open-file limit: {text}");
+        assert_eq!(lines[2], "64", "hard open-file limit: {text}");
+        assert!(lines[3].contains("Operation not permitted") || lines[3].contains("cannot"), "raising a hard limit must fail: {text}");
+    }
+
 }
 
 // ---------------------------------------------------------------------------

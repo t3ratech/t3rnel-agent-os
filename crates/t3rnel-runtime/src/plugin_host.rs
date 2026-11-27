@@ -236,7 +236,7 @@ impl PluginHost {
         let vault_path = home.join(t3rnel_extensions::vault::VAULT_FILE_NAME);
         let vault = Arc::new(VaultBroker::open(vault_path, cfg.dev_mode));
         vault.unlock_ordered(cfg.vault_key)?;
-        let resolver = vault.as_resolver();
+        let resolver = vault.as_resolver(&cfg.plugin_id);
         let proxy = PluginProxy::new(cfg.plugin_id.clone(), cfg.egress, cfg.auth, resolver);
         let auth =
             crate::plugin_auth::ScopedTokenService::new(vault.clone(), cfg.plugin_id.clone());

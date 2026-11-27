@@ -1430,17 +1430,15 @@ pub struct KernelConfig {
     /// this is NEVER safe for production. Default: false.
     #[serde(default)]
     pub plugin_dev_mode: bool,
-    /// Listen address for the plugin gRPC dispatch server (the 14 host
-    /// services plugins call + the PluginCallbacks client cache). Plugins
-    /// reach the core here; loopback only unless the operator deliberately
-    /// exposes it. Empty string disables the server. Default: 127.0.0.1:50061.
-    #[serde(default = "default_plugin_grpc_addr")]
-    pub plugin_grpc_addr: String,
+    /// Private or loopback upstreams a plugin may reach, granted by the owner
+    /// here and never by a manifest: `plugin id -> ["127.0.0.1:3001", ...]`.
+    /// Each entry must also be a host the plugin's signed manifest declares;
+    /// this only lifts the proxy's refusal of private addresses for that one
+    /// plugin and host. Default: none.
+    #[serde(default)]
+    pub plugin_private_hosts: std::collections::BTreeMap<String, Vec<String>>,
 }
 
-fn default_plugin_grpc_addr() -> String {
-    "127.0.0.1:50061".to_string()
-}
 
 /// Heartbeat monitor settings exposed in `[heartbeat]` config section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1726,7 +1724,7 @@ impl Default for KernelConfig {
             skills: HashMap::new(),
             plugin_trusted_signers: Vec::new(),
             plugin_dev_mode: false,
-            plugin_grpc_addr: default_plugin_grpc_addr(),
+            plugin_private_hosts: Default::default(),
         }
     }
 }

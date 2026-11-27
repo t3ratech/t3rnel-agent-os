@@ -1,7 +1,7 @@
 //! Plugin lifecycle REST routes (`17-implementation-guide.md` §9.7).
 //!
 //! Thin axum surface over [`t3rnel_runtime::plugin_lifecycle::PluginManager`].
-//! Mount with `.merge(plugin_admin::router(manager))` in `server.rs` — the
+//! Mount with `.merge(plugin_admin::router(manager, supervisor, opts))` in `server.rs` — the
 //! exact mount line is recorded in `CLI-WIRING-REQUESTS.md`.
 //!
 //! These routes NEVER return secret material: manifests carry secret names
@@ -22,10 +22,14 @@ use t3rnel_runtime::plugin_auth::{ScopedTokenService, StoredGrant};
 use t3rnel_runtime::plugin_lifecycle::{
     InstallOptions, LifecycleError, PluginManager, DEV_MODE_WARNING,
 };
+use t3rnel_runtime::plugin_supervisor::{PluginState, PluginSupervisor, SupervisorError};
 
 #[derive(Clone)]
 pub struct PluginAdminState {
     pub manager: Arc<PluginManager>,
+    /// Starts, stops and watches plugin processes. `None` only where a test
+    /// exercises the install surface alone.
+    pub supervisor: Option<Arc<PluginSupervisor>>,
     pub install_opts: InstallOptions,
     /// In-flight PKCE consent flows keyed by provider (single active flow
     /// per provider — starting a new one replaces the old).
@@ -41,20 +45,28 @@ pub struct InstallRequest {
     pub dev_mode: bool,
 }
 
-fn err(e: LifecycleError) -> (StatusCode, String) {
-    let code = match &e {
+/// The HTTP status a lifecycle failure maps to.
+fn lifecycle_status(e: &LifecycleError) -> StatusCode {
+    match e {
         LifecycleError::Manifest(_) | LifecycleError::MissingEntry(_) => StatusCode::BAD_REQUEST,
         LifecycleError::Signature(_) | LifecycleError::Revoked(_) => StatusCode::FORBIDDEN,
         LifecycleError::AccountBinding => StatusCode::FORBIDDEN,
         LifecycleError::Quarantined(_, _) => StatusCode::TOO_MANY_REQUESTS,
         LifecycleError::NoPrevious => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    (code, e.to_string())
+    }
+}
+
+fn err(e: LifecycleError) -> (StatusCode, String) {
+    (lifecycle_status(&e), e.to_string())
 }
 
 /// Build the router. `home` is the T3rnel home (scratch dir in tests).
-pub fn router(manager: Arc<PluginManager>, opts: InstallOptions) -> Router {
+pub fn router(
+    manager: Arc<PluginManager>,
+    supervisor: Option<Arc<PluginSupervisor>>,
+    opts: InstallOptions,
+) -> Router {
     Router::new()
         .route("/api/plugins", get(list_plugins))
         .route("/api/plugins/install", post(install_plugin))
@@ -68,8 +80,14 @@ pub fn router(manager: Arc<PluginManager>, opts: InstallOptions) -> Router {
         .route("/api/plugins/oauth/start", post(oauth_start))
         .route("/api/plugins/oauth/complete", post(oauth_complete))
         .route("/api/plugins/oauth/status", get(oauth_status))
+        .route("/api/plugins/oauth/bind", post(oauth_bind))
+        .route("/api/plugins/{id}/start", post(start_plugin))
+        .route("/api/plugins/{id}/stop", post(stop_plugin))
+        .route("/api/plugins/{id}/restart", post(restart_plugin))
+        .route("/api/plugins/{id}/state", get(plugin_state))
         .with_state(PluginAdminState {
             manager,
+            supervisor,
             install_opts: opts,
             oauth_flows: Arc::new(dashmap::DashMap::new()),
         })
@@ -87,10 +105,60 @@ fn effective_opts(st: &PluginAdminState, req_dev_mode: bool) -> InstallOptions {
     opts
 }
 
+fn supervisor_err(e: SupervisorError) -> (StatusCode, String) {
+    let code = match &e {
+        SupervisorError::NotPermitted(_, inner) => lifecycle_status(inner),
+        SupervisorError::Unconfined(..) => StatusCode::SERVICE_UNAVAILABLE,
+        SupervisorError::NotRunning(_) => StatusCode::CONFLICT,
+        SupervisorError::Launch(..) | SupervisorError::NotReady(..) => StatusCode::BAD_GATEWAY,
+    };
+    (code, e.to_string())
+}
+
+fn supervisor_of(st: &PluginAdminState) -> Result<&Arc<PluginSupervisor>, (StatusCode, String)> {
+    st.supervisor.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "this host does not supervise plugins".to_string(),
+    ))
+}
+
+async fn start_plugin(
+    State(st): State<PluginAdminState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    supervisor_of(&st)?.start(&id).await.map_err(supervisor_err)?;
+    Ok(Json(serde_json::json!({ "id": id, "state": supervisor_of(&st)?.state(&id) })))
+}
+
+async fn stop_plugin(
+    State(st): State<PluginAdminState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    supervisor_of(&st)?.stop(&id).await.map_err(supervisor_err)?;
+    Ok(Json(serde_json::json!({ "id": id, "state": PluginState::Stopped })))
+}
+
+async fn restart_plugin(
+    State(st): State<PluginAdminState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    supervisor_of(&st)?.restart(&id).await.map_err(supervisor_err)?;
+    Ok(Json(serde_json::json!({ "id": id, "state": supervisor_of(&st)?.state(&id) })))
+}
+
+async fn plugin_state(
+    State(st): State<PluginAdminState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    Ok(Json(serde_json::json!({ "id": id, "state": supervisor_of(&st)?.state(&id) })))
+}
+
 async fn list_plugins(State(st): State<PluginAdminState>) -> impl IntoResponse {
     let dev_mode = st.install_opts.dev_mode;
     Json(serde_json::json!({
         "plugins": st.manager.list(),
+        // What each plugin is doing right now (running, restarting, quarantined, refused).
+        "states": st.supervisor.as_ref().map(|s| s.states().into_iter().collect::<std::collections::BTreeMap<_, _>>()),
         // Persistent, machine-readable dev-mode warning — any UI or agent that
         // lists plugins sees that this host accepts unsigned packages.
         "dev_mode": dev_mode,
@@ -114,6 +182,14 @@ async fn install_plugin(
         .manager
         .install(PathBuf::from(&req.package_path).as_path(), &opts)
         .map_err(err)?;
+    // Installing a plugin starts it. A refusal here (cannot confine, tampered) is
+    // reported by the state endpoint, not turned into an install failure: the
+    // package is installed either way.
+    if let Some(sup) = &st.supervisor {
+        if let Err(e) = sup.start(&report.plugin_id).await {
+            tracing::warn!(plugin = %report.plugin_id, "installed but not started: {e}");
+        }
+    }
     Ok((
         StatusCode::CREATED,
         Json(serde_json::to_value(report).unwrap()),
@@ -134,6 +210,10 @@ async fn uninstall_plugin(
     State(st): State<PluginAdminState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if let Some(sup) = &st.supervisor {
+        // Stop the process first; a plugin that was never running is fine.
+        let _ = sup.stop(&id).await;
+    }
     st.manager.uninstall(&id).map_err(err)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -149,6 +229,12 @@ async fn update_plugin(
         .manager
         .update(PathBuf::from(&req.package_path).as_path(), &opts)
         .map_err(err)?;
+    if let Some(sup) = &st.supervisor {
+        // The new files are in place: run them, not the old process.
+        if let Err(e) = sup.restart(&report.plugin_id).await {
+            tracing::warn!(plugin = %report.plugin_id, "updated but not restarted: {e}");
+        }
+    }
     Ok(Json(serde_json::to_value(report).unwrap()))
 }
 
@@ -156,7 +242,15 @@ async fn rollback_plugin(
     State(st): State<PluginAdminState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if let Some(sup) = &st.supervisor {
+        let _ = sup.stop(&id).await;
+    }
     st.manager.rollback(&id).map_err(err)?;
+    if let Some(sup) = &st.supervisor {
+        if let Err(e) = sup.start(&id).await {
+            tracing::warn!(plugin = %id, "rolled back but not started: {e}");
+        }
+    }
     Ok(Json(serde_json::json!({ "id": id, "rolled_back": true })))
 }
 
@@ -188,7 +282,7 @@ pub struct OAuthStartRequest {
 pub struct OAuthCompleteRequest {
     pub provider: String,
     /// Authorization code — normally delivered by the loopback callback;
-    /// supplied explicitly for non-browser/mock flows.
+    /// supplied explicitly for non-browser test flows.
     pub code: String,
 }
 
@@ -278,6 +372,11 @@ async fn store_consent_grant(
             client_id: Some(client_id.to_string()),
             client_secret: None,
             service_account: None,
+            // The plugins installed now whose signed manifest binds this
+            // provider; any other plugin must be bound explicitly.
+            bound_plugins: st
+                .manager
+                .plugins_binding_secret(&format!("oauth-access:{provider}")),
         },
     )
     .map_err(|e| e.to_string())
@@ -374,7 +473,7 @@ async fn oauth_start(
 }
 
 /// POST /api/plugins/oauth/complete — finish a started flow explicitly with
-/// an authorization code (non-browser/mock-provider path; the loopback
+/// an authorization code (non-browser test-provider path; the loopback
 /// callback path completes in the background without this call).
 async fn oauth_complete(
     State(st): State<PluginAdminState>,
@@ -413,6 +512,32 @@ async fn oauth_complete(
     Ok(Json(
         serde_json::json!({ "provider": provider, "linked": true }),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OAuthBindRequest {
+    pub provider: String,
+    pub plugin: String,
+}
+
+/// POST /api/plugins/oauth/bind — let one more installed plugin have this
+/// provider's token injected for it. The plugin's signed manifest must bind
+/// `oauth-access:<provider>`; the owner is saying "yes, this plugin too".
+async fn oauth_bind(
+    State(st): State<PluginAdminState>,
+    Json(req): Json<OAuthBindRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let secret = format!("oauth-access:{}", req.provider);
+    if !st.manager.plugins_binding_secret(&secret).contains(&req.plugin) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{} is not installed or does not bind {secret}", req.plugin),
+        ));
+    }
+    let svc = consent_token_service(&st)?;
+    svc.bind_plugin(&req.provider, &req.plugin)
+        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "bound": req.plugin, "provider": req.provider })))
 }
 
 /// GET /api/plugins/oauth/status?provider=X — pending-flow and stored-grant
@@ -468,7 +593,7 @@ mod tests {
             trusted_keys: vec![],
             dev_mode: true,
         };
-        (router(mgr, opts), home)
+        (router(mgr, None, opts), home)
     }
 
     #[tokio::test]

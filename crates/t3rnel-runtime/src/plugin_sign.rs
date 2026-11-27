@@ -402,6 +402,7 @@ fn lite_from_v1(m: &t3rnel_bridge::manifest::Manifest) -> PluginManifestLite {
                 .iter()
                 .map(|c| c.to_string())
                 .collect(),
+            host_services: m.requires.keys().cloned().collect(),
         }),
     }
 }
@@ -515,6 +516,7 @@ pub fn build_package(src: &Path, dst: &Path) -> Result<PluginManifestLite, SignE
                     })
                     .collect(),
                 data_classes: src_manifest.permissions.data_classes.clone(),
+                host_services: src_manifest.requires.host_services.clone(),
             }),
         },
         // `Manifest::parse` already ran full v1 validation (capabilities,

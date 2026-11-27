@@ -56,8 +56,10 @@ pub struct AppState {
     pub ide_command_notify: Arc<tokio::sync::Notify>,
     /// Health tracker for LLM provider metrics and circuit breaker state.
     pub health_tracker: Arc<t3rnel_runtime::drivers::health_tracker::InMemoryHealthTracker>,
-    /// gRPC plugin dispatch (14 host services + PluginCallbacks client
-    /// cache). `None` when `plugin_grpc_addr` is empty/disabled.
+    /// Core side of the plugin host contract: the 14 host services served to each
+    /// supervised plugin over its inherited stream, and the callbacks the core
+    /// makes into it. Always present in a running daemon; `None` only in tests that
+    /// do not touch plugins.
     pub plugin_dispatch: Option<Arc<t3rnel_runtime::plugin_grpc::PluginDispatch>>,
 }
 

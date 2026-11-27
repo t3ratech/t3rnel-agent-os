@@ -99,6 +99,13 @@ pub struct StoredGrant {
     /// browser OAuth consent (that flow yields no refresh token).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account: Option<ServiceAccountCredential>,
+    /// Plugins this grant may be injected for through `oauth-access:<provider>`.
+    /// The proxy adds the grant's **whole** access token, which the narrowed
+    /// `authref:` path cannot limit, so the consent records which plugins it
+    /// was given for; any other plugin that binds the name is refused. Empty
+    /// means no plugin.
+    #[serde(default)]
+    pub bound_plugins: Vec<String>,
 }
 
 /// A Google-style service-account credential stored inside a [`StoredGrant`]
@@ -223,6 +230,18 @@ impl ScopedTokenService {
             .map_err(Into::into)
     }
 
+    /// Allow `plugin_id` to have this provider's token injected for it.
+    pub fn bind_plugin(&self, provider: &str, plugin_id: &str) -> Result<(), AuthError> {
+        crate::plugin_storage::validate_plugin_id(plugin_id)
+            .map_err(|e| AuthError::Vault(e.to_string()))?;
+        let mut grant = self.load_grant(provider)?;
+        if !grant.bound_plugins.iter().any(|p| p == plugin_id) {
+            grant.bound_plugins.push(plugin_id.to_string());
+            self.save_grant(provider, &grant)?;
+        }
+        Ok(())
+    }
+
     /// Remove a stored grant (consent revoked). Implemented by deleting the
     /// vault entry through the broker once vault delete lands; until then
     /// callers should overwrite expiry via `store_grant`.
@@ -282,6 +301,44 @@ impl ScopedTokenService {
         }
     }
 
+    /// The client a refresh must use for `endpoint`: the shared client for a
+    /// loopback test server, otherwise one pinned to addresses that were
+    /// checked here. A refresh token, client secret or signed assertion goes
+    /// only to a public address: a grant whose endpoint names (or resolves to)
+    /// a private, loopback or link-local address is refused, and the connection
+    /// is made to the address that was checked, so DNS cannot change its mind
+    /// between the check and the request.
+    async fn client_for(&self, endpoint: &str) -> Result<reqwest::Client, String> {
+        let url = reqwest::Url::parse(endpoint).map_err(|_| "not a URL".to_string())?;
+        let host = url.host_str().ok_or("no host")?.to_string();
+        if url.scheme() == "http" {
+            // Only loopback http passes `endpoint_allowed`; tests use it.
+            return Ok(self.http.clone());
+        }
+        let port = url.port_or_known_default().unwrap_or(443);
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        let addrs: Vec<std::net::SocketAddr> = match bare.parse::<std::net::IpAddr>() {
+            Ok(ip) => vec![std::net::SocketAddr::new(ip, port)],
+            Err(_) => tokio::net::lookup_host((bare, port))
+                .await
+                .map_err(|e| format!("cannot resolve {host}: {e}"))?
+                .collect(),
+        };
+        if addrs.is_empty() {
+            return Err(format!("{host} resolves to no address"));
+        }
+        if let Some(bad) = addrs.iter().find(|a| t3rnel_egress::is_private_or_special(&a.ip())) {
+            return Err(format!("{host} resolves to a private or special address ({})", bad.ip()));
+        }
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(REFRESH_TIMEOUT_SECS))
+            .resolve_to_addrs(&host, &addrs)
+            .build()
+            .map_err(|e| e.to_string())
+    }
+
     /// Ensure the stored grant's access token is fresh, refreshing through
     /// the provider token endpoint when needed. Returns the (possibly
     /// updated) grant.
@@ -327,8 +384,11 @@ impl ScopedTokenService {
         if let Some(secret) = grant.client_secret.as_deref() {
             form.push(("client_secret", secret));
         }
-        let resp = self
-            .http
+        let client = self
+            .client_for(&endpoint)
+            .await
+            .map_err(|e| AuthError::Refresh(provider.to_string(), format!("token endpoint refused: {e}")))?;
+        let resp = client
             .post(&endpoint)
             .form(&form)
             .send()
@@ -380,8 +440,10 @@ impl ScopedTokenService {
         }
         let assertion =
             mint_service_account_assertion(provider, sa, &grant.scopes)?;
-        let resp = self
-            .http
+        let client = self.client_for(&sa.token_uri).await.map_err(|e| {
+            AuthError::Refresh(provider.to_string(), format!("token uri refused: {e}"))
+        })?;
+        let resp = client
             .post(&sa.token_uri)
             .form(&[
                 (
@@ -647,6 +709,7 @@ mod tests {
             client_id: Some("cid".into()),
             client_secret: None,
             service_account: None,
+            bound_plugins: vec![],
         }
     }
 
@@ -943,6 +1006,34 @@ mod tests {
                 "{endpoint}: {err:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_token_endpoint_on_a_private_address_never_receives_the_refresh_token() {
+        // A listener that records whether anything connects. https to a private
+        // literal must be refused before any connection is made.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        for endpoint in [
+            format!("https://127.0.0.1:{port}/token"),
+            "https://10.0.0.5/token".to_string(),
+            "https://169.254.169.254/latest/token".to_string(),
+            "https://[::1]/token".to_string(),
+            "https://192.168.1.1/token".to_string(),
+        ] {
+            let (_d, svc) = service();
+            let mut g = grant(&["s"], Some(-10));
+            g.token_endpoint = Some(endpoint.clone());
+            g.client_secret = Some("must-not-leave".into());
+            svc.store_grant("google", g).unwrap();
+            let err = svc.issue("google", &["s".into()], None).await.unwrap_err();
+            assert!(
+                matches!(&err, AuthError::Refresh(_, m) if m.contains("refused") && m.contains("private")),
+                "{endpoint}: {err:?}"
+            );
+        }
+        assert!(listener.accept().is_err(), "nothing may connect to the private listener");
     }
 
     #[tokio::test]

@@ -3,23 +3,23 @@
 //!
 //! [`PluginDispatch`] is the core side of the two-stream contract:
 //!
-//! - **Host services (plugin → core).** One tonic server implements all 14
-//!   proto services (`Http`, `Storage`, `Memory`, `Tools`, `Routes`,
-//!   `Schedule`, `Events`, `Approval`, `Llm`, `Sentinel`, `Ui`, `Agents`,
-//!   `Notify`, `Audit`, `Auth`). Every request carries a [`PluginIdentity`]
-//!   and is routed to that plugin's own [`PluginHost`] (storage + egress
-//!   proxy + vault + scoped tokens) and per-plugin service state. Plugin
-//!   identity is also asserted via `x-plugin-id` request metadata, which
-//!   must match the message's `plugin.id`.
+//! - **Host services (plugin → core).** One tonic server per plugin
+//!   connection implements all 14 proto services (`Http`, `Storage`,
+//!   `Memory`, `Tools`, `Routes`, `Schedule`, `Events`, `Approval`, `Llm`,
+//!   `Sentinel`, `Ui`, `Agents`, `Notify`, `Audit`, `Auth`, `Conversations`).
+//!   The connection is a **pre-connected stream the supervisor inherited into
+//!   the sandboxed plugin** ([`PluginDispatch::serve_stream`]); there is no
+//!   listening port. The core therefore knows which plugin is on the other end
+//!   because it created the stream for that plugin, and a request naming any
+//!   other plugin is refused. Plugin identity is **not** taken from what the
+//!   plugin says about itself.
 //!
-//! - **PluginCallbacks (core → plugin).** Each plugin runs its own
-//!   `PluginCallbacks` gRPC server; the dispatch learns its address from
-//!   the `x-plugin-callback` metadata the plugin client sends (the same
-//!   channel the proto's "inherited descriptor" model assumes) and caches a
-//!   [`PluginCallbacksClient`]. Core→plugin calls — `CallTool`,
+//! - **PluginCallbacks (core → plugin).** A second inherited stream carries the
+//!   plugin's own `PluginCallbacks` gRPC server; the supervisor attaches it with
+//!   [`PluginDispatch::attach_callbacks`]. Core→plugin calls — `CallTool`,
 //!   `HandleRoute`, `ScheduleTick`, `OnEvent`, `RenderView`, `Health`,
-//!   `BriefingQuery`, `StatusQuery` — go through
-//!   [`PluginDispatch::callbacks`] and the `*_plugin` helpers below.
+//!   `BriefingQuery`, `StatusQuery` — go through [`PluginDispatch::callbacks`]
+//!   and the `*_plugin` helpers below.
 //!
 //! Trust rules enforced here:
 //!
@@ -34,7 +34,7 @@
 //!   [`PluginDispatch::resolve_approval`]; plugins cannot approve
 //!   themselves (decisions only come through the host API).
 //! - `Llm` and `Agents.SpawnAgent` are honest seams: without an injected
-//!   backend/dispatcher they return `UNAVAILABLE`, never a fake success.
+//!   backend/dispatcher they return `UNAVAILABLE`, never a made-up success.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -64,7 +64,6 @@ use pb::plugin_callbacks_client::PluginCallbacksClient as CallbacksClient;
 /// Metadata keys the plugin client sets on every host-service call.
 pub const META_PLUGIN_ID: &str = "x-plugin-id";
 pub const META_PLUGIN_VERSION: &str = "x-plugin-version";
-pub const META_PLUGIN_CALLBACK: &str = "x-plugin-callback";
 
 // ---------------------------------------------------------------------------
 // Small conversions
@@ -131,6 +130,8 @@ fn storage_err(e: StorageError) -> Status {
 /// plus the service registries that are not borrowed from storage.
 struct PluginRuntime {
     host: PluginHost,
+    /// Host services the signed manifest declared; gated services check it.
+    host_services: std::collections::BTreeSet<String>,
     routes: RouteRegistry,
     /// Registered tool defs the plugin offered via `Tools.Register`
     /// (tool_id → JSON ToolDef for CallTool routing/audit).
@@ -147,7 +148,7 @@ struct PluginRuntime {
 
 /// Host-injected LLM backend for the `llm` service. The production wiring
 /// (kernel model router) plugs in here; without it `Llm.Complete` returns
-/// UNAVAILABLE rather than a stub answer.
+/// UNAVAILABLE rather than an invented answer.
 #[async_trait::async_trait]
 pub trait LlmCompleter: Send + Sync {
     async fn complete(
@@ -170,6 +171,78 @@ pub trait AgentDispatcher: Send + Sync {
         -> Result<String, String>;
 }
 
+/// Let the egress rules for the hosts the owner granted reach private addresses.
+/// A host the manifest did not declare has no rule here, so it cannot be added.
+fn lift_private(rules: &mut [t3rnel_egress::EgressRule], granted: &[String]) {
+    for rule in rules.iter_mut().filter(|r| granted.contains(&r.host)) {
+        rule.allow_private = true;
+    }
+}
+
+#[cfg(test)]
+mod private_host_grant_tests {
+    use super::*;
+
+    fn rule(host: &str) -> t3rnel_egress::EgressRule {
+        t3rnel_egress::EgressRule {
+            host: host.into(),
+            methods: vec!["*".into()],
+            paths: vec!["*".into()],
+            allow_private: false,
+            allow_encoded_slash: false,
+        }
+    }
+
+    #[test]
+    fn only_the_granted_declared_host_is_lifted() {
+        let mut rules = vec![rule("127.0.0.1:3001"), rule("api.example.com")];
+        // The owner also named a host the manifest never declared: it changes nothing.
+        lift_private(&mut rules, &["127.0.0.1:3001".into(), "10.0.0.9".into()]);
+        assert!(rules[0].allow_private);
+        assert!(!rules[1].allow_private);
+        assert_eq!(rules.len(), 2);
+    }
+
+    #[test]
+    fn no_grant_lifts_nothing() {
+        let mut rules = vec![rule("127.0.0.1:3001")];
+        lift_private(&mut rules, &[]);
+        assert!(!rules[0].allow_private);
+    }
+}
+
+/// Counters the core's conversation service reports to a plugin's briefing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConversationCounters {
+    pub threads_total: u64,
+    pub unread_threads: u64,
+    /// Threads with an inbound message in the last 24 hours (not messages).
+    pub inbound_today: u64,
+    /// Threads with an outbound message in the last 24 hours (not messages).
+    pub outbound_today: u64,
+    pub pending_approvals: u64,
+}
+
+/// What `Conversations.Send`/`Stats` need from the core's conversation service.
+/// The service lives in the API layer, which attaches it after boot
+/// ([`PluginDispatch::attach_conversations`]); until then both calls answer
+/// UNAVAILABLE.
+#[async_trait::async_trait]
+pub trait ConversationsPort: Send + Sync {
+    /// Send `text` on a linked account's thread; returns a receipt id.
+    async fn send(
+        &self,
+        channel: &str,
+        account: &str,
+        thread_key: &str,
+        text: &str,
+    ) -> Result<String, String>;
+    fn counters(&self) -> ConversationCounters;
+}
+
+/// Longest message a plugin may send in one call.
+const MAX_CONVERSATION_TEXT: usize = 4000;
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -182,6 +255,8 @@ struct DispatchInner {
     home: PathBuf,
     dev_mode: bool,
     vault_key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    /// Owner grants: plugin id -> declared hosts that may be private/loopback.
+    private_hosts: std::collections::BTreeMap<String, Vec<String>>,
     plugins: Mutex<HashMap<String, Arc<PluginRuntime>>>,
     callbacks: Mutex<HashMap<String, CallbacksClient<Channel>>>,
     /// topic → plugin_id → subscriber tag. Glob suffix `.*` supported.
@@ -190,6 +265,8 @@ struct DispatchInner {
     approval_waiters: Mutex<HashMap<String, watch::Sender<String>>>,
     llm: Option<Arc<dyn LlmCompleter>>,
     agents: Option<Arc<dyn AgentDispatcher>>,
+    /// Set once by the API layer when the conversation service exists.
+    conversations: std::sync::OnceLock<Arc<dyn ConversationsPort>>,
 }
 
 impl PluginDispatch {
@@ -199,14 +276,31 @@ impl PluginDispatch {
                 home: home.into(),
                 dev_mode,
                 vault_key: None,
+                private_hosts: Default::default(),
                 plugins: Mutex::new(HashMap::new()),
                 callbacks: Mutex::new(HashMap::new()),
                 event_subs: Mutex::new(HashMap::new()),
                 approval_waiters: Mutex::new(HashMap::new()),
                 llm: None,
                 agents: None,
+                conversations: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Give plugins that declared `conversations` access to the core's
+    /// conversation service. Callable once, after the dispatch is shared.
+    pub fn attach_conversations(&self, port: Arc<dyn ConversationsPort>) {
+        let _ = self.inner.conversations.set(port);
+    }
+
+    /// Owner-granted private upstreams (`KernelConfig::plugin_private_hosts`).
+    /// Call before the dispatch is shared.
+    pub fn with_private_hosts(mut self, grants: std::collections::BTreeMap<String, Vec<String>>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("dispatch must be configured before sharing")
+            .private_hosts = grants;
+        self
     }
 
     pub fn with_vault_key(mut self, key: zeroize::Zeroizing<[u8; 32]>) -> Self {
@@ -232,12 +326,10 @@ impl PluginDispatch {
 
     /// Resolve (or lazily create) the runtime for `plugin_id`, verifying the
     /// caller-supplied manifest digest against the installed manifest.json
-    /// when present. `callback_addr` (from `x-plugin-callback`) registers or
-    /// refreshes the PluginCallbacks client.
+    /// when present.
     async fn ensure_plugin(
         &self,
         identity: Option<&pb::PluginIdentity>,
-        callback_addr: Option<&str>,
     ) -> Result<Arc<PluginRuntime>, Status> {
         let plugin_id = identity
             .map(|i| i.id.clone())
@@ -283,16 +375,24 @@ impl PluginDispatch {
             plugins.get(&plugin_id).cloned()
         };
         if let Some(rt) = existing {
-            self.maybe_register_callback(&plugin_id, callback_addr)
-                .await;
             return Ok(rt);
         }
-        let cfg: PluginHostConfig =
+        let mut cfg: PluginHostConfig =
             host_config_from_manifest(&manifest, self.inner.vault_key.clone(), self.inner.dev_mode);
+        // Only a host the signed manifest already declares can be lifted.
+        if let Some(granted) = self.inner.private_hosts.get(&plugin_id) {
+            lift_private(&mut cfg.egress, granted);
+        }
         let host = PluginHost::open(&self.inner.home, cfg)
             .map_err(|e| Status::internal(format!("plugin host open failed: {e}")))?;
+        let host_services = manifest
+            .permissions
+            .as_ref()
+            .map(|p| p.host_services.iter().cloned().collect())
+            .unwrap_or_default();
         let rt = Arc::new(PluginRuntime {
             host,
+            host_services,
             routes: RouteRegistry::new(),
             tools: Mutex::new(BTreeMap::new()),
             views: Mutex::new(BTreeMap::new()),
@@ -309,41 +409,47 @@ impl PluginDispatch {
                 }
             }
         };
-        self.maybe_register_callback(&plugin_id, callback_addr)
-            .await;
         Ok(rt)
     }
 
-    /// Connect (or refresh) the PluginCallbacks client for `plugin_id` when
-    /// the caller supplied `x-plugin-callback`. Failures are logged and the
-    /// plugin still works for host services that don't need callbacks.
-    async fn maybe_register_callback(&self, plugin_id: &str, callback_addr: Option<&str>) {
-        let Some(addr) = callback_addr else { return };
-        if addr.is_empty() {
-            return;
-        }
-        if self.inner.callbacks.lock().unwrap().contains_key(plugin_id) {
-            return; // already connected — don't churn a channel per RPC
-        }
-        let uri = match tonic::transport::Uri::try_from(addr.to_string()) {
-            Ok(u) => u,
-            Err(_) => {
-                tracing::warn!(plugin = plugin_id, "bad x-plugin-callback uri {addr:?}");
-                return;
-            }
-        };
-        match Channel::builder(uri).connect().await {
-            Ok(channel) => {
-                self.inner
-                    .callbacks
-                    .lock()
-                    .unwrap()
-                    .insert(plugin_id.to_string(), PluginCallbacksClient::new(channel));
-            }
-            Err(e) => {
-                tracing::warn!(plugin = plugin_id, "plugin callback connect failed: {e}");
-            }
-        }
+    /// Attach the plugin's `PluginCallbacks` server, reached over the second
+    /// inherited stream. Called by the supervisor right after launch; replaces any
+    /// earlier channel (a restarted plugin gets a fresh one).
+    pub async fn attach_callbacks(
+        &self,
+        plugin_id: &str,
+        stream: tokio::net::UnixStream,
+    ) -> Result<(), Status> {
+        crate::plugin_storage::validate_plugin_id(plugin_id)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        // The connector hands out the one stream we have. A second connection
+        // attempt (after the plugin died) fails, which is what we want.
+        let slot = Arc::new(Mutex::new(Some(stream)));
+        let channel = tonic::transport::Endpoint::try_from("http://plugin.invalid")
+            .map_err(|e| Status::internal(e.to_string()))?
+            .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+                let slot = slot.clone();
+                async move {
+                    let stream = slot.lock().unwrap().take().ok_or_else(|| {
+                        std::io::Error::other("the plugin's callback stream was already used")
+                    })?;
+                    Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+                }
+            }))
+            .await
+            .map_err(|e| Status::unavailable(format!("plugin callback stream: {e}")))?;
+        self.inner
+            .callbacks
+            .lock()
+            .unwrap()
+            .insert(plugin_id.to_string(), PluginCallbacksClient::new(channel));
+        Ok(())
+    }
+
+    /// Forget a plugin's callback channel and runtime state (it stopped).
+    pub fn detach(&self, plugin_id: &str) {
+        self.inner.callbacks.lock().unwrap().remove(plugin_id);
+        self.inner.plugins.lock().unwrap().remove(plugin_id);
     }
 
     /// The PluginCallbacks client for `plugin_id`, if the plugin connected
@@ -362,19 +468,16 @@ impl PluginDispatch {
             })
     }
 
-    /// Extract the asserted plugin identity + callback addr from request
-    /// metadata. `x-plugin-id`, when present, must equal `identity.id`.
-    fn identity_and_callback(
+    /// The plugin id a request asserts: `x-plugin-id`, when present, must equal
+    /// `identity.id`. (The connection-bound check in [`PluginHostGrpc`] runs
+    /// first; this keeps the two statements about identity consistent.)
+    fn asserted_identity(
         &self,
         md: &tonic::metadata::MetadataMap,
         identity: Option<&pb::PluginIdentity>,
-    ) -> Result<(Option<String>, Option<String>), Box<Status>> {
+    ) -> Result<Option<String>, Box<Status>> {
         let meta_id = md
             .get(META_PLUGIN_ID)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let callback = md
-            .get(META_PLUGIN_CALLBACK)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
         if let (Some(m), Some(i)) = (&meta_id, identity) {
@@ -384,7 +487,7 @@ impl PluginDispatch {
                 )));
             }
         }
-        Ok((meta_id.or_else(|| identity.map(|i| i.id.clone())), callback))
+        Ok(meta_id.or_else(|| identity.map(|i| i.id.clone())))
     }
 
     /// Shared per-RPC preamble: validate identity, resolve runtime.
@@ -393,8 +496,8 @@ impl PluginDispatch {
         md: &tonic::metadata::MetadataMap,
         identity: Option<&pb::PluginIdentity>,
     ) -> Result<Arc<PluginRuntime>, Status> {
-        let (_id, callback) = self.identity_and_callback(md, identity).map_err(|e| *e)?;
-        self.ensure_plugin(identity, callback.as_deref()).await
+        self.asserted_identity(md, identity).map_err(|e| *e)?;
+        self.ensure_plugin(identity).await
     }
 
     // ------------------------------------------------------------------
@@ -485,9 +588,7 @@ impl PluginDispatch {
                     Some(&pb::PluginIdentity {
                         id: pid.clone(),
                         ..Default::default()
-                    }),
-                    None,
-                )
+                    }))
                 .await
             else {
                 continue;
@@ -505,6 +606,21 @@ impl PluginDispatch {
                         continue;
                     }
                 };
+                // Move the job on BEFORE firing it. The handler may reschedule
+                // itself under the same id (the morning briefing does), and a
+                // write after the call would overwrite that with the stale
+                // copy; a slow handler must also not be fired twice by the
+                // next pass.
+                let mut next = job.clone();
+                if next.interval_secs > 0 {
+                    next.fire_at = now_unix + next.interval_secs;
+                } else {
+                    next.enabled = false;
+                }
+                if svc.add(&next).is_err() {
+                    out.push((pid.clone(), job.id.clone(), "state-write-failed".into()));
+                    continue;
+                }
                 let resp = client
                     .schedule_tick(pb::ScheduleTickRequest {
                         job_id: job.id.clone(),
@@ -513,32 +629,38 @@ impl PluginDispatch {
                         fired_at: Some(ts_to_proto(chrono::Utc::now())),
                     })
                     .await;
-                match resp {
+                let failure = match resp {
                     Ok(r) => {
                         let tick = r.into_inner();
                         if tick.status == "ok" {
-                            // Reschedule: interval jobs advance fire_at;
-                            // one-shot (interval_secs == 0) jobs disable.
-                            let mut next = job.clone();
-                            if next.interval_secs > 0 {
-                                next.fire_at = now_unix + next.interval_secs;
-                                next.enabled = true;
-                            } else {
-                                next.enabled = false;
-                            }
-                            let _ = svc.add(&next);
                             out.push((pid.clone(), job.id.clone(), "ok".into()));
+                            None
                         } else {
-                            out.push((
-                                pid.clone(),
-                                job.id.clone(),
-                                format!("error:{}", tick.error),
-                            ));
+                            Some(format!("error:{}", tick.error))
                         }
                     }
-                    Err(e) => {
-                        out.push((pid.clone(), job.id.clone(), format!("transport:{e}")));
+                    Err(e) => Some(format!("transport:{e}")),
+                };
+                if let Some(outcome) = failure {
+                    // A one-shot that failed is not lost: if it is still retired
+                    // (the handler did not reschedule it), try again shortly.
+                    if job.interval_secs == 0 {
+                        let still_retired = rt
+                            .host
+                            .storage
+                            .state_get(&format!("schedule:{}", job.id))
+                            .ok()
+                            .flatten()
+                            .and_then(|b| serde_json::from_str::<ScheduledJob>(&b).ok())
+                            .is_some_and(|j| !j.enabled);
+                        if still_retired {
+                            let mut retry = job.clone();
+                            retry.fire_at = now_unix + 300;
+                            retry.enabled = true;
+                            let _ = svc.add(&retry);
+                        }
                     }
+                    out.push((pid.clone(), job.id.clone(), outcome));
                 }
             }
         }
@@ -558,9 +680,7 @@ impl PluginDispatch {
                 Some(&pb::PluginIdentity {
                     id: plugin_id.to_string(),
                     ..Default::default()
-                }),
-                None,
-            )
+                }))
             .await?;
         let svc = crate::plugin_services::ApprovalService::new(&rt.host.storage);
         svc.resolve(
@@ -608,18 +728,26 @@ impl PluginDispatch {
         out
     }
 
-    /// Serve all 14 host services on `addr`. Takes `Arc<Self>` so the
-    /// dispatch can stay shared with the API layer while serving.
-    pub async fn serve(
+    /// Serve all 14 host services to **one** plugin over its inherited stream,
+    /// until the plugin closes it. Every request on this connection is treated
+    /// as coming from `plugin_id`, whatever it claims; a request naming another
+    /// plugin is refused. Takes `Arc<Self>` so the dispatch stays shared with the
+    /// API layer.
+    pub async fn serve_stream(
         self: Arc<Self>,
-        addr: std::net::SocketAddr,
+        plugin_id: String,
+        stream: tokio::net::UnixStream,
     ) -> Result<(), tonic::transport::Error> {
         use pb::{
             agents_server, approval_server, audit_server, auth_server, conversations_server,
             events_server, http_server, llm_server, memory_server, notify_server, routes_server,
             schedule_server, sentinel_server, storage_server, tools_server, ui_server,
         };
-        let svc = PluginHostGrpc { dispatch: self };
+        let svc = PluginHostGrpc {
+            dispatch: self,
+            bound: Some(plugin_id),
+        };
+        let incoming = tokio_stream::iter([Ok::<_, std::io::Error>(stream)]);
         tonic::transport::Server::builder()
             .add_service(http_server::HttpServer::new(svc.clone()))
             .add_service(storage_server::StorageServer::new(svc.clone()))
@@ -637,7 +765,7 @@ impl PluginDispatch {
             .add_service(audit_server::AuditServer::new(svc.clone()))
             .add_service(auth_server::AuthServer::new(svc.clone()))
             .add_service(conversations_server::ConversationsServer::new(svc.clone()))
-            .serve(addr)
+            .serve_with_incoming(incoming)
             .await
     }
 }
@@ -649,6 +777,40 @@ impl PluginDispatch {
 #[derive(Clone)]
 struct PluginHostGrpc {
     dispatch: Arc<PluginDispatch>,
+    /// The plugin this connection belongs to. Set by the supervisor, never by the plugin.
+    bound: Option<String>,
+}
+
+impl PluginHostGrpc {
+    /// Resolve the plugin for one request. A request on a bound connection may
+    /// only be for the plugin that owns the connection; the identity it carries
+    /// is checked against that, and an absent identity is filled in from it.
+    async fn runtime_for(
+        &self,
+        md: &tonic::metadata::MetadataMap,
+        identity: Option<&pb::PluginIdentity>,
+    ) -> Result<Arc<PluginRuntime>, Status> {
+        let Some(bound) = &self.bound else {
+            return self.dispatch.runtime_for(md, identity).await;
+        };
+        if let Some(claimed) = identity.map(|i| i.id.as_str()).filter(|s| !s.is_empty()) {
+            if claimed != bound {
+                return Err(Status::permission_denied(
+                    "this connection belongs to a different plugin",
+                ));
+            }
+        }
+        if let Some(meta) = md.get(META_PLUGIN_ID).and_then(|v| v.to_str().ok()) {
+            if meta != bound {
+                return Err(Status::permission_denied(
+                    "this connection belongs to a different plugin",
+                ));
+            }
+        }
+        let mut ident = identity.cloned().unwrap_or_default();
+        ident.id = bound.clone();
+        self.dispatch.runtime_for(md, Some(&ident)).await
+    }
 }
 
 use pb::*;
@@ -672,7 +834,7 @@ impl http_server::Http for PluginHostGrpc {
     ) -> Result<Response<HttpResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let proxy_req = crate::plugin_proxy::ProxyRequest {
             url: req.url.clone(),
             method: req.method.clone(),
@@ -726,7 +888,7 @@ impl storage_server::Storage for PluginHostGrpc {
     ) -> Result<Response<KvGetResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let value = rt
             .host
             .storage
@@ -749,7 +911,7 @@ impl storage_server::Storage for PluginHostGrpc {
     async fn kv_put(&self, request: Request<KvPutRequest>) -> Result<Response<()>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let value = String::from_utf8(payload_to_bytes(req.value.as_ref()))
             .map_err(|_| Status::invalid_argument("kv value must be utf-8 text"))?;
         rt.host
@@ -765,7 +927,7 @@ impl storage_server::Storage for PluginHostGrpc {
     ) -> Result<Response<KvDeleteResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let deleted = rt
             .host
             .storage
@@ -780,7 +942,7 @@ impl storage_server::Storage for PluginHostGrpc {
     ) -> Result<Response<KvListResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let (keys, truncated) = rt
             .host
             .storage
@@ -795,7 +957,7 @@ impl storage_server::Storage for PluginHostGrpc {
     ) -> Result<Response<KvDeleteNamespaceResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let deleted = rt
             .host
             .storage
@@ -810,7 +972,7 @@ impl storage_server::Storage for PluginHostGrpc {
     ) -> Result<Response<SqlExecResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let params: Vec<SqlParam> = req.params.iter().map(sql_param_from).collect();
         // SQLite is blocking; keep it off the async executor. The whole
         // runtime Arc moves in — PluginStorage is Sync (mutex-guarded conn).
@@ -834,7 +996,7 @@ impl storage_server::Storage for PluginHostGrpc {
     ) -> Result<Response<SqlExecBatchResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let statements: Vec<(String, Vec<SqlParam>)> = req
             .statements
             .iter()
@@ -864,7 +1026,7 @@ impl storage_server::Storage for PluginHostGrpc {
     ) -> Result<Response<BlobPutResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let data = payload_to_bytes(req.value.as_ref());
         let (sha256, size) = rt
             .host
@@ -880,7 +1042,7 @@ impl storage_server::Storage for PluginHostGrpc {
     ) -> Result<Response<BlobGetResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         match rt
             .host
             .storage
@@ -904,7 +1066,7 @@ impl storage_server::Storage for PluginHostGrpc {
     ) -> Result<Response<MigrateResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         // Snapshot before the first pending migration (same rule as
         // PluginStorage::migrate, surfaced so the caller gets the path).
         let storage = &rt.host.storage;
@@ -994,7 +1156,7 @@ impl memory_server::Memory for PluginHostGrpc {
     async fn write(&self, request: Request<MemoryWriteRequest>) -> Result<Response<()>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         // Only the plugin's own namespace (its id) is writable.
         if req.namespace != rt.host.plugin_id {
             return Err(Status::permission_denied(
@@ -1019,7 +1181,7 @@ impl memory_server::Memory for PluginHostGrpc {
     ) -> Result<Response<MemoryReadResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         if req.namespace != rt.host.plugin_id {
             return Err(Status::permission_denied(
                 "memory namespace must be the plugin's own id",
@@ -1052,7 +1214,7 @@ impl memory_server::Memory for PluginHostGrpc {
     ) -> Result<Response<MemoryQueryResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         if req.namespace != rt.host.plugin_id {
             return Err(Status::permission_denied(
                 "memory namespace must be the plugin's own id",
@@ -1106,7 +1268,7 @@ impl tools_server::Tools for PluginHostGrpc {
     ) -> Result<Response<RegisterToolsResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let mut accepted = Vec::new();
         let mut rejected = std::collections::HashMap::new();
         for t in &req.tools {
@@ -1144,7 +1306,7 @@ impl tools_server::Tools for PluginHostGrpc {
     ) -> Result<Response<UnregisterToolsResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let mut tools = rt.tools.lock().unwrap();
         let mut removed = Vec::new();
         if req.ids.is_empty() {
@@ -1169,7 +1331,7 @@ impl routes_server::Routes for PluginHostGrpc {
     ) -> Result<Response<MountRoutesResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let mut mounted = Vec::new();
         let mut rejected = std::collections::HashMap::new();
         for r in &req.routes {
@@ -1199,7 +1361,7 @@ impl routes_server::Routes for PluginHostGrpc {
     ) -> Result<Response<UnmountRoutesResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         // RouteRegistry has no remove; rebuild keeping wanted entries.
         // (routes are per-plugin; unmount all when ids empty)
         let removed_paths: Vec<String> = if req.paths.is_empty() {
@@ -1227,7 +1389,7 @@ impl schedule_server::Schedule for PluginHostGrpc {
     ) -> Result<Response<ScheduleAddResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let svc = ScheduleService::new(&rt.host.storage);
         let now = chrono::Utc::now().timestamp() as u64;
         let mut added = Vec::new();
@@ -1275,7 +1437,7 @@ impl schedule_server::Schedule for PluginHostGrpc {
     ) -> Result<Response<ScheduleRemoveResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let svc = ScheduleService::new(&rt.host.storage);
         let mut removed = Vec::new();
         if req.job_ids.is_empty() {
@@ -1302,7 +1464,7 @@ impl schedule_server::Schedule for PluginHostGrpc {
     ) -> Result<Response<ScheduleListResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let idx = rt
             .host
             .storage
@@ -1353,7 +1515,7 @@ impl events_server::Events for PluginHostGrpc {
         let plugin_id = ident!(&req)
             .map(|i| i.id.clone())
             .ok_or_else(|| Status::invalid_argument("plugin identity required"))?;
-        let _rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let _rt = self.runtime_for(&md, ident!(&req)).await?;
         let mut subs = self.dispatch.inner.event_subs.lock().unwrap();
         let mut granted = Vec::new();
         for topic in &req.topics {
@@ -1379,7 +1541,7 @@ impl events_server::Events for PluginHostGrpc {
         let plugin_id = ident!(&req)
             .map(|i| i.id.clone())
             .ok_or_else(|| Status::invalid_argument("plugin identity required"))?;
-        let _rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let _rt = self.runtime_for(&md, ident!(&req)).await?;
         let mut subs = self.dispatch.inner.event_subs.lock().unwrap();
         let mut removed = Vec::new();
         if req.subscriptions.is_empty() {
@@ -1409,7 +1571,7 @@ impl events_server::Events for PluginHostGrpc {
         let plugin_id = ident!(&req)
             .map(|i| i.id.clone())
             .ok_or_else(|| Status::invalid_argument("plugin identity required"))?;
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         // Topic must be namespaced under the plugin id or end in a declared
         // wildcard subscription target; emitting to arbitrary core topics is
         // refused unless the topic starts with the plugin's own id.
@@ -1479,7 +1641,7 @@ impl approval_server::Approval for PluginHostGrpc {
         let plugin_id = ident!(&req)
             .map(|i| i.id.clone())
             .ok_or_else(|| Status::invalid_argument("plugin identity required"))?;
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let evidence = req.evidence.clone().unwrap_or_default();
         let risk = svc_risk_class(evidence.risk_class);
         let approval_id = uuid::Uuid::new_v4().to_string();
@@ -1551,7 +1713,7 @@ impl llm_server::Llm for PluginHostGrpc {
         let plugin_id = ident!(&req)
             .map(|i| i.id.clone())
             .ok_or_else(|| Status::invalid_argument("plugin identity required"))?;
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let llm = self
             .dispatch
             .inner
@@ -1605,7 +1767,7 @@ impl sentinel_server::Sentinel for PluginHostGrpc {
     ) -> Result<Response<ReportFindingResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let sev =
             match FindingSeverity::try_from(req.severity).unwrap_or(FindingSeverity::Unspecified) {
                 FindingSeverity::Info => "info",
@@ -1637,7 +1799,7 @@ impl sentinel_server::Sentinel for PluginHostGrpc {
     ) -> Result<Response<CanaryStatusResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         // Canary count is host-side bookkeeping in host_state.
         let count = rt
             .host
@@ -1661,7 +1823,7 @@ impl ui_server::Ui for PluginHostGrpc {
     ) -> Result<Response<DeclareViewsResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let mut declared = Vec::new();
         let mut rejected = std::collections::HashMap::new();
         for v in &req.views {
@@ -1684,7 +1846,7 @@ impl ui_server::Ui for PluginHostGrpc {
     ) -> Result<Response<RemoveViewsResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let mut views = rt.views.lock().unwrap();
         let removed: Vec<String> = if req.view_ids.is_empty() {
             views.keys().cloned().collect()
@@ -1706,7 +1868,7 @@ impl agents_server::Agents for PluginHostGrpc {
     ) -> Result<Response<RegisterAgentsResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let mut registered = Vec::new();
         let mut rejected = std::collections::HashMap::new();
         for a in &req.agents {
@@ -1740,7 +1902,7 @@ impl agents_server::Agents for PluginHostGrpc {
         let plugin_id = ident!(&req)
             .map(|i| i.id.clone())
             .ok_or_else(|| Status::invalid_argument("plugin identity required"))?;
-        let _rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let _rt = self.runtime_for(&md, ident!(&req)).await?;
         // The agent def must exist (registered by this plugin).
         let def = _rt
             .host
@@ -1768,7 +1930,7 @@ impl agents_server::Agents for PluginHostGrpc {
     ) -> Result<Response<RemoveAgentsResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let mut removed = Vec::new();
         if req.agent_ids.is_empty() {
             // Enumerate via index if present.
@@ -1805,7 +1967,7 @@ impl notify_server::Notify for PluginHostGrpc {
     ) -> Result<Response<NotifyResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let svc = crate::plugin_services::NotifyService::new(&rt.host.storage);
         // The message body is the reference payload; keep it JSON so the
         // host dispatcher can render level/title/body/link.
@@ -1861,7 +2023,7 @@ impl auth_server::Auth for PluginHostGrpc {
     ) -> Result<Response<AuthTokenResponse>, Status> {
         let md = request.metadata().clone();
         let req = request.into_inner();
-        let rt = self.dispatch.runtime_for(&md, ident!(&req)).await?;
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
         let grant = rt
             .host
             .auth()
@@ -1891,34 +2053,86 @@ impl auth_server::Auth for PluginHostGrpc {
 }
 
 // ---------------------------------------------------------------------------
-// conversations — honest seam
+// conversations — gated to plugins that declared the service
 // ---------------------------------------------------------------------------
 //
-// The proto contract carries `Conversations.Send`/`Stats`, but the dispatch
-// has no conversation-service handle yet (the ConversationService lives in
-// the API/kernel layer, not in PluginDispatch). Both RPCs therefore answer
-// UNIMPLEMENTED rather than pretending — plugin-side clients must surface
-// that as a refusal, which comms does via HostError::Refused. Wiring a real
-// sender is tracked as the remaining seam (needs a ConversationService
-// handle on PluginDispatch, injected by the API layer at boot).
+// A plugin may send on a linked account's thread only if its signed manifest
+// `requires` the `conversations` service. Every send is audited in the
+// plugin's own log (channel, account and length; never the text).
+
+impl PluginHostGrpc {
+    #[allow(clippy::result_large_err)] // tonic's Status is the error type of every handler here
+    fn conversations_for(
+        &self,
+        rt: &PluginRuntime,
+    ) -> Result<Arc<dyn ConversationsPort>, Status> {
+        if !rt.host_services.contains("conversations") {
+            return Err(Status::permission_denied(
+                "this plugin's signed manifest does not require the conversations service",
+            ));
+        }
+        self.dispatch
+            .inner
+            .conversations
+            .get()
+            .cloned()
+            .ok_or_else(|| Status::unavailable("the conversation service is not running"))
+    }
+}
 
 #[tonic::async_trait]
 impl conversations_server::Conversations for PluginHostGrpc {
     async fn send(
         &self,
-        _request: Request<ConversationSendRequest>,
+        request: Request<ConversationSendRequest>,
     ) -> Result<Response<ConversationSendResponse>, Status> {
-        Err(Status::unimplemented(
-            "conversations.send is not wired to a channel sender yet",
-        ))
+        let md = request.metadata().clone();
+        let req = request.into_inner();
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
+        let port = self.conversations_for(&rt)?;
+        if req.channel.is_empty() || req.account.is_empty() || req.thread_key.is_empty() {
+            return Err(Status::invalid_argument("channel, account and thread_key are required"));
+        }
+        if req.text.trim().is_empty() {
+            return Err(Status::invalid_argument("text must not be empty"));
+        }
+        if req.text.chars().count() > MAX_CONVERSATION_TEXT {
+            return Err(Status::invalid_argument(format!(
+                "text is longer than {MAX_CONVERSATION_TEXT} characters"
+            )));
+        }
+        let outcome = port
+            .send(&req.channel, &req.account, &req.thread_key, &req.text)
+            .await;
+        let _ = crate::plugin_services::AuditService::new(&rt.host.storage).record(
+            "conversations",
+            "send",
+            &format!(
+                "channel={} account={} chars={} ok={}",
+                req.channel,
+                req.account,
+                req.text.chars().count(),
+                outcome.is_ok()
+            ),
+        );
+        let receipt = outcome.map_err(|e| Status::unavailable(format!("send failed: {e}")))?;
+        Ok(Response::new(ConversationSendResponse { receipt }))
     }
 
     async fn stats(
         &self,
-        _request: Request<ConversationStatsRequest>,
+        request: Request<ConversationStatsRequest>,
     ) -> Result<Response<ConversationStatsResponse>, Status> {
-        Err(Status::unimplemented(
-            "conversations.stats is not wired to the conversation service yet",
-        ))
+        let md = request.metadata().clone();
+        let req = request.into_inner();
+        let rt = self.runtime_for(&md, ident!(&req)).await?;
+        let c = self.conversations_for(&rt)?.counters();
+        Ok(Response::new(ConversationStatsResponse {
+            threads_total: c.threads_total,
+            unread_threads: c.unread_threads,
+            inbound_today: c.inbound_today,
+            outbound_today: c.outbound_today,
+            pending_approvals: c.pending_approvals,
+        }))
     }
 }

@@ -45,6 +45,7 @@ const OAUTH_ACCESS_SKEW_SECS: i64 = 30;
 /// `ref_name` is the full secret name, used only for error reporting.
 fn resolve_oauth_access(
     broker: &VaultBroker,
+    plugin_id: &str,
     provider: &str,
     ref_name: &str,
 ) -> Result<Zeroizing<String>, ProxyError> {
@@ -61,6 +62,11 @@ fn resolve_oauth_access(
         .resolve(&format!("oauth:{provider}"))
         .map_err(|_| unavailable())?;
     let grant: StoredGrant = serde_json::from_str(raw.as_str()).map_err(|_| unavailable())?;
+    // The whole token is injected, so only the plugins this grant was consented
+    // for may have it (see `StoredGrant::bound_plugins`).
+    if !grant.bound_plugins.iter().any(|p| p == plugin_id) {
+        return Err(unavailable());
+    }
     if let Some(exp) = grant.expires_at {
         if exp - OAUTH_ACCESS_SKEW_SECS <= chrono::Utc::now().timestamp() {
             return Err(unavailable());
@@ -211,19 +217,19 @@ impl VaultBroker {
     }
 
     /// Shared handle for use as a [`SecretResolver`] by [`crate::plugin_proxy::PluginProxy`].
-    pub fn as_resolver(self: &Arc<Self>) -> Arc<dyn SecretResolver> {
-        struct BrokerResolver(Arc<VaultBroker>);
+    pub fn as_resolver(self: &Arc<Self>, plugin_id: &str) -> Arc<dyn SecretResolver> {
+        struct BrokerResolver(Arc<VaultBroker>, String);
         impl SecretResolver for BrokerResolver {
             fn resolve(&self, name: &str) -> Result<Zeroizing<String>, ProxyError> {
                 if let Some(provider) = name.strip_prefix(OAUTH_ACCESS_PREFIX) {
-                    return resolve_oauth_access(&self.0, provider, name);
+                    return resolve_oauth_access(&self.0, &self.1, provider, name);
                 }
                 self.0
                     .resolve(name)
                     .map_err(|_| ProxyError::SecretUnavailable(name.to_string()))
             }
         }
-        Arc::new(BrokerResolver(self.clone()))
+        Arc::new(BrokerResolver(self.clone(), plugin_id.to_string()))
     }
 }
 
@@ -357,6 +363,7 @@ mod tests {
             client_id: Some("cid".into()),
             client_secret: None,
             service_account: None,
+            bound_plugins: vec!["org.test.vault".into()],
         }
     }
 
@@ -366,7 +373,7 @@ mod tests {
         let auth = crate::plugin_auth::ScopedTokenService::new(broker.clone(), "org.test.vault");
         auth.store_grant("google", oauth_grant(Some(3600))).unwrap();
 
-        let resolver = broker.as_resolver();
+        let resolver = broker.as_resolver("org.test.vault");
         let token = resolver.resolve("oauth-access:google").unwrap();
         assert_eq!(token.as_str(), "ya29.proxy-resolved-token");
 
@@ -386,13 +393,34 @@ mod tests {
     }
 
     #[test]
+    fn oauth_access_is_refused_to_a_plugin_the_grant_was_not_consented_for() {
+        let (_d, broker) = oauth_broker();
+        let auth = crate::plugin_auth::ScopedTokenService::new(broker.clone(), "host");
+        auth.store_grant("google", oauth_grant(Some(3600))).unwrap();
+        // Another plugin whose signed manifest binds the same name gets nothing.
+        let other = broker.as_resolver("org.test.other");
+        assert!(matches!(
+            other.resolve("oauth-access:google"),
+            Err(ProxyError::SecretUnavailable(_))
+        ));
+        // Until the grant is bound to it.
+        auth.bind_plugin("google", "org.test.other").unwrap();
+        assert!(other.resolve("oauth-access:google").is_ok());
+        // A grant bound to nobody serves nobody.
+        let mut g = oauth_grant(Some(3600));
+        g.bound_plugins.clear();
+        auth.store_grant("google", g).unwrap();
+        assert!(broker.as_resolver("org.test.vault").resolve("oauth-access:google").is_err());
+    }
+
+    #[test]
     fn oauth_access_fails_closed_when_grant_expired() {
         let (_d, broker) = oauth_broker();
         let auth = crate::plugin_auth::ScopedTokenService::new(broker.clone(), "org.test.vault");
         // Already expired, no refresh attempted at resolve time — the proxy
         // path is sync, so freshness is checked, never repaired here.
         auth.store_grant("google", oauth_grant(Some(-10))).unwrap();
-        let resolver = broker.as_resolver();
+        let resolver = broker.as_resolver("org.test.vault");
         assert!(matches!(
             resolver.resolve("oauth-access:google"),
             Err(ProxyError::SecretUnavailable(_))

@@ -56,6 +56,7 @@ pub mod plugin_sandbox;
 pub mod plugin_services;
 pub mod plugin_sign;
 pub mod plugin_storage;
+pub mod plugin_supervisor;
 pub mod plugin_vault;
 pub mod privacy;
 pub mod process_manager;
