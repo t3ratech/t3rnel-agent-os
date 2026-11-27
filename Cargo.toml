@@ -133,6 +133,7 @@ hex = "0.4"
 subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
+ring = "0.17"
 zeroize = { version = "1", features = ["derive"] }
 
 # Rate limiting

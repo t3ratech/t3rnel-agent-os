@@ -94,6 +94,30 @@ pub struct StoredGrant {
     /// that require it to refresh. Lives only in the encrypted vault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
+    /// Service-account credential for jwt-bearer refresh — used when the
+    /// grant was provisioned from a GCP service-account key rather than a
+    /// browser OAuth consent (that flow yields no refresh token).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<ServiceAccountCredential>,
+}
+
+/// A Google-style service-account credential stored inside a [`StoredGrant`]
+/// so the host can mint access tokens itself (jwt-bearer, RFC 7523) when no
+/// OAuth refresh token exists. The private key lives only in the encrypted
+/// vault — it is never returned across the plugin boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAccountCredential {
+    /// Service-account email (`client_email` in the key file).
+    pub client_email: String,
+    /// PEM-encoded PKCS#8 RSA private key (`private_key` in the key file).
+    pub private_key: String,
+    /// Token endpoint (`token_uri` in the key file; https only).
+    #[serde(default = "default_service_account_token_uri")]
+    pub token_uri: String,
+}
+
+fn default_service_account_token_uri() -> String {
+    "https://oauth2.googleapis.com/token".to_string()
 }
 
 /// What a plugin receives: a reference + metadata, never token material.
@@ -276,6 +300,13 @@ impl ScopedTokenService {
         if Self::is_fresh(&grant) {
             return Ok(grant);
         }
+        // Service-account grants refresh via jwt-bearer — no refresh token
+        // exists in that flow, so check it before the refresh-token path.
+        if let Some(sa) = grant.service_account.clone() {
+            return self
+                .refresh_service_account(provider, grant, &sa)
+                .await;
+        }
         let (Some(refresh), Some(endpoint)) =
             (grant.refresh_token.clone(), grant.token_endpoint.clone())
         else {
@@ -330,6 +361,82 @@ impl ScopedTokenService {
             .map(|s| (Utc::now() + chrono::Duration::seconds(s as i64)).timestamp());
         self.save_grant(provider, &grant)?;
         Ok(grant)
+    }
+
+    /// Mint a fresh access token from a stored service-account credential
+    /// (jwt-bearer grant — the service-account analogue of a refresh token).
+    /// The signed assertion and the private key never leave this process.
+    async fn refresh_service_account(
+        &self,
+        provider: &str,
+        mut grant: StoredGrant,
+        sa: &ServiceAccountCredential,
+    ) -> Result<StoredGrant, AuthError> {
+        if !Self::endpoint_allowed(&sa.token_uri) {
+            return Err(AuthError::Refresh(
+                provider.to_string(),
+                "service-account token uri must be an https URL".into(),
+            ));
+        }
+        let assertion =
+            mint_service_account_assertion(provider, sa, &grant.scopes)?;
+        let resp = self
+            .http
+            .post(&sa.token_uri)
+            .form(&[
+                (
+                    "grant_type",
+                    "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                ),
+                ("assertion", assertion.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(|e| {
+                AuthError::Refresh(provider.to_string(), e.without_url().to_string())
+            })?;
+        if !resp.status().is_success() {
+            return Err(AuthError::Refresh(
+                provider.to_string(),
+                format!("service-account token endpoint returned {}", resp.status()),
+            ));
+        }
+        #[derive(Deserialize)]
+        struct TokenResponse {
+            access_token: String,
+            #[serde(default)]
+            expires_in: Option<u64>,
+        }
+        let tok: TokenResponse = resp
+            .json()
+            .await
+            .map_err(|e| {
+                AuthError::Refresh(provider.to_string(), e.without_url().to_string())
+            })?;
+        grant.access_token = tok.access_token;
+        grant.expires_at = tok
+            .expires_in
+            .map(|s| (Utc::now() + chrono::Duration::seconds(s as i64)).timestamp());
+        self.save_grant(provider, &grant)?;
+        Ok(grant)
+    }
+
+    /// Whether `provider` has a usable stored grant: fresh, or refreshable
+    /// via refresh token or service-account credential. Never returns token
+    /// material — used by the admin OAuth status endpoint, where `issue()`
+    /// cannot run because it requires a non-empty scope list.
+    pub async fn grant_usable(&self, provider: &str) -> bool {
+        if !Self::valid_provider(provider) {
+            return false;
+        }
+        match self.load_grant(provider) {
+            Ok(g) => {
+                Self::is_fresh(&g)
+                    || g.refresh_token.is_some()
+                    || g.service_account.is_some()
+            }
+            Err(_) => false,
+        }
     }
 
     fn check_scopes(
@@ -456,6 +563,61 @@ impl ScopedTokenService {
     }
 }
 
+/// Build a signed jwt-bearer assertion for `sa` covering `scopes`
+/// (RFC 7523 §2.1 + the Google service-account flow). RS256 via `ring` —
+/// the private key is parsed from PEM and used in `Zeroizing` memory only.
+fn mint_service_account_assertion(
+    provider: &str,
+    sa: &ServiceAccountCredential,
+    scopes: &[String],
+) -> Result<String, AuthError> {
+    let refresh_err = |m: &str| AuthError::Refresh(provider.to_string(), m.to_string());
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header = serde_json::json!({"alg": "RS256", "typ": "JWT"});
+    let now = Utc::now().timestamp();
+    let claims = serde_json::json!({
+        "iss": sa.client_email,
+        "scope": scopes.join(" "),
+        "aud": sa.token_uri,
+        "iat": now,
+        "exp": now + 3600,
+    });
+    let input = format!(
+        "{}.{}",
+        b64.encode(serde_json::to_vec(&header).map_err(|e| refresh_err(&e.to_string()))?),
+        b64.encode(serde_json::to_vec(&claims).map_err(|e| refresh_err(&e.to_string()))?)
+    );
+    let der = pem_to_der(&sa.private_key).map_err(|e| refresh_err(&e))?;
+    let key = ring::signature::RsaKeyPair::from_pkcs8(&der)
+        .map_err(|_| refresh_err("service-account key is not a valid PKCS#8 RSA key"))?;
+    let rng = ring::rand::SystemRandom::new();
+    let mut sig = vec![0u8; key.public().modulus_len()];
+    key.sign(
+        &ring::signature::RSA_PKCS1_SHA256,
+        &rng,
+        input.as_bytes(),
+        &mut sig,
+    )
+    .map_err(|e| refresh_err(&format!("jwt signing failed: {e}")))?;
+    Ok(format!("{input}.{}", b64.encode(sig)))
+}
+
+/// Strip PEM armor and base64-decode a `PRIVATE KEY` block to PKCS#8 DER.
+fn pem_to_der(pem: &str) -> Result<Vec<u8>, String> {
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .flat_map(|l| l.trim().chars())
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if body.is_empty() {
+        return Err("service-account private_key is empty".into());
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(|e| format!("service-account private_key is not valid base64: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +646,7 @@ mod tests {
             token_endpoint: None,
             client_id: Some("cid".into()),
             client_secret: None,
+            service_account: None,
         }
     }
 
@@ -802,5 +965,137 @@ mod tests {
             "a reference issued before revocation stops working"
         );
         assert!(svc.issue("google", &["s".into()], None).await.is_err());
+    }
+
+    // ---- service-account (jwt-bearer) refresh -------------------------------------------------------
+
+    /// Throwaway 2048-bit RSA key generated for tests only
+    /// (`openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`).
+    /// It signs assertions the mock token endpoint never validates.
+    const TEST_SA_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCpb3/o2e4Rmpd4\n\
++YzkgE2KN9a1v3SC0bNJ675wauYn3BXvDhFFJMBF4+atFISEskru3dHifE3GVx9i\n\
+fw8F5i6ts5VHyftkVm1vRp5Dj67eS2JfwiJ5kF/M87ZZa710MSitzGsVTM+uW4BK\n\
+n1CnzL9+cX39jP4RXEAsthjwX3eaOgJxOcdYE9oFYEk6sQ1FdsAe3I6vZ0R9IhMH\n\
+Uz9hk+f8LCSQ4hiqMNux5C+S1SS+g8FAXcxRmBwGpbZGvNVkN9q3fCy6ziEVGFo2\n\
+C0OJBfgKIdmyP5+2vhsGJut8N3yK42F83nqdbh836sMAnsXNiEZGn9poEFC6dzoi\n\
+6lyZTRsNAgMBAAECggEASqA6ZRN/YK+HIZhALvA3trXrUnd12JyF6/vyD891eX7d\n\
+BkJa5upN6Tp8giT0TQG+MUDvzWJUWxRKVXaC5mVAj+71w/25RLMwVf9ze2xQZ8Yq\n\
+GOUHjCVDnKCG4xGqCwAP26SaUXJYUoIomjVbL9zlRsqz5DXyPTE1brvxdgWGRx2o\n\
+IiBKU6gab8fh1jEEN6LlfiIMkv02kgvkH9GvlxzoGpq0ihiJfiuu4ncvPVrRCEQ7\n\
+r8d49HvqHfDArhMp0NsPJmP/PNFhgIUdcKSgTEa9Z22u69peklONOZn/g666FFLA\n\
+OOW3h0FJflP7cFYWlVdr8ezyJJsl1UGjNWJFbvVufQKBgQDW+Ihj8J3FfsSaSmEY\n\
+VhKTDtWwDNmDEbYi8qEzEM7ZbkMTzx7LWB3qYYdytFTZfdFcfcFE9ZC99YDWEA+q\n\
+bpliY2lbmTh10AcP7QinY99x5S9lt37wpQ4cp9Tk427Lnge5Wo0uWsFJELtwBs1L\n\
+nVrmOQCZX2KlT6kCjHLojCLuVwKBgQDJxh1KtrNoWLe/c7AwdQtRUXuxa87dp+Kw\n\
+xL6KbH1MAJGihMDUzdiuuaBUftdLTiF+j0Sj/RRtDDtaWS2AWUncZplqCoLff9zZ\n\
+UM4rN/hLHJL3uMrTen+rzocEKSP0NDx5Mbks2yQ9inn+RDSomqOfED+Mp2Sl9ZKW\n\
+bCPdpqsbOwKBgExVDeEm5G7nV5pNxPJmRcwwHVKZDXdMB7ebHgBK/JgaXfkft5iO\n\
+3niGTxk8zVA5K+lCwijhZZb+INRh+Z4UDaTxFc0vt+ulhYxzJ3qArSv9LHpa0NlU\n\
+UpF8Ss1HsOTeZXG8pJsMIMv4BAaAc89gvZE4Nm0/gICgq6u7AWZvtEubAoGBALAu\n\
+3lrjxyog9Wkl0j2tpdE+rhwQv9QKCUZCtQHXk1yuznuzIVFv4HlIures/b7SnSqO\n\
+XOg4TwKdAKJ2ZeXBkV3y9JiETxxq4GOdTDiuqY6kh6vo3qnkN+DD+F7osW1Fw1wr\n\
+z75cJ3vZE4ay9awXQzHcFTFy5M6I7JOOH48mPhgLAoGBAKTxnGaMiZnujh5Nq4VW\n\
+SIFQPITDmr38qS/g2OcdpnSU0tnk4xexuGCRfEWksHBkahhF8f/MPpBDkod5v06p\n\
+g9u2+UON2Liz+RzPq4/2uOS/a/hNSR7BbOiRDnLksVvxZqXYm0uEZmIMeCwDob39\n\
+mnl4ocx7s8WXkOWBQAZafC5V\n\
+-----END PRIVATE KEY-----";
+
+    fn sa_grant(token_uri: String) -> ServiceAccountCredential {
+        ServiceAccountCredential {
+            client_email: "reader@test-project.iam.gserviceaccount.com".into(),
+            private_key: TEST_SA_PRIVATE_KEY.into(),
+            token_uri,
+        }
+    }
+
+    const SA_OK_REPLY: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 51\r\nConnection: close\r\n\r\n{\"access_token\":\"sa-fresh-token\",\"expires_in\":3600}";
+
+    #[tokio::test]
+    async fn grant_usable_covers_fresh_expired_refreshable_and_unknown() {
+        let (_d, svc) = service();
+        assert!(!svc.grant_usable("google").await, "unknown provider");
+        assert!(!svc.grant_usable("NOT A PROVIDER").await);
+
+        // Fresh grant.
+        svc.store_grant("google", grant(&["s"], Some(3600))).unwrap();
+        assert!(svc.grant_usable("google").await);
+
+        // Expired but refreshable via refresh token.
+        let mut g = grant(&["s"], Some(-10));
+        svc.store_grant("google", g.clone()).unwrap();
+        assert!(svc.grant_usable("google").await);
+
+        // Expired, refresh token stripped, but a service account can renew it.
+        g.refresh_token = None;
+        g.service_account = Some(sa_grant(
+            "https://oauth2.googleapis.com/token".into(),
+        ));
+        svc.store_grant("google", g).unwrap();
+        assert!(svc.grant_usable("google").await);
+
+        // Expired with nothing to refresh from.
+        let mut dead = grant(&["s"], Some(-10));
+        dead.refresh_token = None;
+        svc.store_grant("google", dead).unwrap();
+        assert!(!svc.grant_usable("google").await);
+    }
+
+    #[tokio::test]
+    async fn service_account_grant_refreshes_via_jwt_bearer() {
+        let (port, seen) = recording_endpoint(SA_OK_REPLY).await;
+        let (_d, svc) = service();
+        let mut g = grant(&["scope:a"], Some(-10)); // expired → must refresh
+        g.refresh_token = None;
+        g.service_account = Some(sa_grant(format!("http://127.0.0.1:{port}/token")));
+        svc.store_grant("google", g).unwrap();
+
+        let issued = svc.issue("google", &["scope:a".into()], None).await.unwrap();
+        // The stored grant now carries the token the mock endpoint minted.
+        let stored = svc.load_grant("google").unwrap();
+        assert_eq!(stored.access_token, "sa-fresh-token");
+        assert!(stored.refresh_token.is_none());
+
+        // The request was a jwt-bearer exchange carrying a 3-part assertion.
+        let raw = seen.lock().unwrap().join("\n---\n");
+        assert_eq!(seen.lock().unwrap().len(), 1, "{raw}");
+        assert!(
+            raw.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer"),
+            "{raw}"
+        );
+        let assertion = raw
+            .split("assertion=")
+            .nth(1)
+            .and_then(|s| s.split('&').next())
+            .and_then(|s| s.split_whitespace().next())
+            .expect("assertion form field");
+        assert_eq!(
+            assertion.matches('.').count(),
+            2,
+            "assertion must be a header.payload.signature JWT: {assertion}"
+        );
+
+        // A second issue is served from the now-fresh grant: no second call.
+        svc.issue("google", &["scope:a".into()], None).await.unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let resolved = svc.resolve(&issued.token_ref).await.unwrap();
+        assert_eq!(resolved.access_token.as_str(), "sa-fresh-token");
+    }
+
+    #[tokio::test]
+    async fn service_account_token_uri_must_be_https() {
+        let (_d, svc) = service();
+        let mut g = grant(&["s"], Some(-10));
+        g.refresh_token = None;
+        g.service_account = Some(sa_grant("http://evil.example.com/token".into()));
+        svc.store_grant("google", g).unwrap();
+        let err = svc.issue("google", &["s".into()], None).await.unwrap_err();
+        assert!(
+            matches!(&err, AuthError::Refresh(_, m) if m.contains("https")),
+            "{err:?}"
+        );
+        // Refused before any request — the vault still holds the dead grant.
+        let stored = svc.load_grant("google").unwrap();
+        assert_eq!(stored.access_token, "ya29.test-access");
     }
 }

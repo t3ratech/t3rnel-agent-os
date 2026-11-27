@@ -43,6 +43,7 @@ toml = "0.8"
 libc = "0.2"
 hmac = { workspace = true }
 rand = { workspace = true }
+ring = { workspace = true }
 ed25519-dalek = { workspace = true }
 serde_yaml = { workspace = true }
 tonic = { workspace = true }

@@ -356,6 +356,7 @@ mod tests {
             token_endpoint: Some("https://oauth2.googleapis.com/token".into()),
             client_id: Some("cid".into()),
             client_secret: None,
+            service_account: None,
         }
     }
 

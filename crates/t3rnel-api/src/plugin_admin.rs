@@ -277,6 +277,7 @@ async fn store_consent_grant(
             token_endpoint: Some(template.token_url.clone()),
             client_id: Some(client_id.to_string()),
             client_secret: None,
+            service_account: None,
         },
     )
     .map_err(|e| e.to_string())
@@ -442,13 +443,14 @@ async fn oauth_status(
     })))
 }
 
-/// Vault presence check for `oauth:<provider>` — issues a 1s token with no
-/// scopes (always a subset) purely to prove a stored grant exists.
+/// Vault presence check for `oauth:<provider>` — `issue()` requires a
+/// non-empty scope list, so it can never prove presence on its own; the
+/// service's `grant_usable` checks the stored grant directly.
 async fn grant_present(st: &PluginAdminState, provider: &str) -> bool {
     let Ok(svc) = consent_token_service(st) else {
         return false;
     };
-    svc.issue(provider, &[], Some(1)).await.is_ok()
+    svc.grant_usable(provider).await
 }
 
 #[cfg(test)]
