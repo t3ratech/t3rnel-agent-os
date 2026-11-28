@@ -670,6 +670,8 @@ pub fn build_conversation_stack(
     use t3rnel_runtime::plugin_vault::VaultBroker;
 
     let home = &kernel.config.home_dir;
+    // The pending-approval store lives under this kernel's home, never under a default one.
+    crate::pending_actions::bind_home(home);
     let mut registry = ChannelRegistry::new(home);
     let _ = registry.load();
 

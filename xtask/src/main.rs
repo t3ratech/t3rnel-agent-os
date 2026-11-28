@@ -67,22 +67,32 @@ fn plugin_keygen(args: Vec<String>) -> ExitCode {
     }
 }
 
-/// `plugin-sign --src <dir> --out <dir> --key <key-file> [--account-home <home>]`
+/// `plugin-sign --src <dir> --out <dir> (--key <key-file> | --key-env <VAR>) [--account-home <home>]`
 fn plugin_sign(args: Vec<String>) -> ExitCode {
-    let (Some(src), Some(out), Some(key)) = (
-        flag_value(&args, "--src"),
-        flag_value(&args, "--out"),
-        flag_value(&args, "--key"),
-    ) else {
+    let (Some(src), Some(out)) = (flag_value(&args, "--src"), flag_value(&args, "--out")) else {
         eprintln!(
             "usage: cargo run -p xtask -- plugin-sign --src <plugin-src-dir> \
-             --out <package-out-dir> --key <release-signing.key> [--account-home <t3rnel-home>]"
+             --out <package-out-dir> (--key <release-signing.key> | --key-env <VAR>) \
+             [--account-home <t3rnel-home>]"
         );
         return ExitCode::from(2);
     };
+    let (key, key_env) = (flag_value(&args, "--key"), flag_value(&args, "--key-env"));
+    if key.is_none() == key_env.is_none() {
+        eprintln!("plugin-sign: give exactly one of --key <file> or --key-env <VAR>");
+        return ExitCode::from(2);
+    }
     let account_home = flag_value(&args, "--account-home");
     let result = (|| -> anyhow::Result<()> {
-        let signer = ReleaseSigner::load(std::path::Path::new(&key))?;
+        let signer = match (&key, &key_env) {
+            (Some(file), _) => ReleaseSigner::load(std::path::Path::new(file))?,
+            (None, Some(var)) => {
+                let hex = std::env::var(var)
+                    .map_err(|_| anyhow::anyhow!("environment variable {var} is not set"))?;
+                ReleaseSigner::from_seed_hex(&hex)?
+            }
+            (None, None) => unreachable!("checked above"),
+        };
         let report = package_plugin(
             std::path::Path::new(&src),
             std::path::Path::new(&out),

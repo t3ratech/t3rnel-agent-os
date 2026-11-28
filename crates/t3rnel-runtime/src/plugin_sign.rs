@@ -101,6 +101,19 @@ impl ReleaseSigner {
         })
     }
 
+    /// Load a signing key from the hex of its 32-byte seed, as held in a secret
+    /// manager and handed over through an environment variable (`doppler run`).
+    pub fn from_seed_hex(seed_hex: &str) -> Result<Self, SignError> {
+        let bytes = hex::decode(seed_hex.trim())
+            .map_err(|_| SignError::Manifest("signing key is not valid hex".into()))?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| SignError::Manifest("signing key is not a 32-byte seed".into()))?;
+        Ok(ReleaseSigner {
+            sk: SigningKey::from_bytes(&arr),
+        })
+    }
+
     /// Hex-encoded verifying key — the value for `plugin_trusted_signers`.
     pub fn pubkey_hex(&self) -> String {
         hex::encode(self.sk.verifying_key().to_bytes())
@@ -770,6 +783,18 @@ requires:
         let key_path = kd.join("release-signing.key");
         let s2 = ReleaseSigner::load(&key_path).unwrap();
         assert_eq!(s1.pubkey_hex(), s2.pubkey_hex());
+    }
+
+    #[test]
+    fn a_key_held_as_hex_signs_as_the_file_key_does_and_bad_hex_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kd = key_dir(tmp.path());
+        let from_file = ReleaseSigner::generate(&kd).unwrap();
+        let seed = fs::read(kd.join("release-signing.key")).unwrap();
+        let from_hex = ReleaseSigner::from_seed_hex(&format!("{}\n", hex::encode(&seed))).unwrap();
+        assert_eq!(from_file.pubkey_hex(), from_hex.pubkey_hex());
+        assert!(ReleaseSigner::from_seed_hex("not hex").is_err());
+        assert!(ReleaseSigner::from_seed_hex("abcd").is_err(), "wrong length");
     }
 
     /// A bridge manifest v1 `manifest.yaml` (04 §3) is validated by

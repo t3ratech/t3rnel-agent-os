@@ -76,20 +76,55 @@ pub struct PendingStore {
     path: Option<PathBuf>,
 }
 
-fn store_path() -> PathBuf {
-    t3rnel_kernel::config::t3rnel_home().join("pending-actions.json")
+/// The file a store keeps its items in, under the home it is bound to.
+fn store_file(home: &std::path::Path) -> PathBuf {
+    home.join("pending-actions.json")
 }
 
-static STORE: LazyLock<Mutex<PendingStore>> = LazyLock::new(|| {
-    let mut store = PendingStore {
-        path: Some(store_path()),
-        ..Default::default()
-    };
-    store.load();
-    Mutex::new(store)
-});
+/// The process-wide store. It starts unbound and in-memory: it only ever touches a file once a
+/// kernel has told it which home it belongs to ([`bind_home`]). A store that opened the real
+/// `~/.t3rnel` by itself let every test that raised an approval leave it in the operator's
+/// live approvals, and from there in the briefing and in chat prompts.
+static STORE: LazyLock<Mutex<PendingStore>> = LazyLock::new(|| Mutex::new(PendingStore::default()));
+
+/// Bind the store to `home`: load what is saved there and keep saving there. The first binding
+/// wins; later calls (a second kernel in the same process) leave it where it is.
+pub fn bind_home(home: &std::path::Path) {
+    STORE.lock().unwrap().bind(store_file(home));
+}
 
 impl PendingStore {
+    /// Bind to `path` and load it, unless already bound.
+    fn bind(&mut self, path: PathBuf) {
+        if self.path.is_some() {
+            return;
+        }
+        self.path = Some(path);
+        let in_memory = std::mem::take(&mut self.items);
+        self.load();
+        // Items raised before binding (none in the daemon) are kept, after the saved ones.
+        self.items.extend(in_memory);
+        self.next_seq = self
+            .items
+            .iter()
+            .filter_map(|i| i.id.strip_prefix("P-").and_then(|n| n.parse::<u64>().ok()))
+            .max()
+            .unwrap_or(self.next_seq);
+    }
+
+    /// Mark every pending item whose time has passed as expired. True when any changed.
+    fn sweep_expired(&mut self) -> bool {
+        let now = Utc::now();
+        let mut changed = false;
+        for item in &mut self.items {
+            if item.state == PendingState::Pending && item.expires_at.is_some_and(|e| e <= now) {
+                item.state = PendingState::Expired;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     fn load(&mut self) {
         let Some(path) = &self.path else { return };
         if let Ok(text) = std::fs::read_to_string(path) {
@@ -115,16 +150,11 @@ impl PendingStore {
         }
     }
 
-    /// Live = pending and not past expiry.
-    fn is_live(item: &PendingAction, now: DateTime<Utc>) -> bool {
-        item.state == PendingState::Pending && item.expires_at.map(|e| e > now).unwrap_or(true)
-    }
-
+    /// What still waits for a decision. Callers sweep first, so nothing past its time is here.
     pub fn list(&self) -> Vec<PendingAction> {
-        let now = Utc::now();
         self.items
             .iter()
-            .filter(|i| Self::is_live(i, now) || i.state == PendingState::Pending)
+            .filter(|i| i.state == PendingState::Pending)
             .cloned()
             .collect()
     }
@@ -236,7 +266,11 @@ fn state_name(s: &PendingState) -> &'static str {
 // ---------------------------------------------------------------------------
 
 pub fn list_pending() -> Vec<PendingAction> {
-    STORE.lock().unwrap().list()
+    let mut store = STORE.lock().unwrap();
+    if store.sweep_expired() {
+        store.save();
+    }
+    store.list()
 }
 
 pub fn get_pending(id: &str) -> Option<PendingAction> {
@@ -318,4 +352,76 @@ pub struct ResolvePendingRequest {
 #[derive(Debug, Deserialize)]
 pub struct SnoozePendingRequest {
     pub secs: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(summary: &str, expires_in_secs: Option<i64>) -> PendingAction {
+        PendingAction {
+            id: String::new(),
+            kind: PendingKind::Approval,
+            summary: summary.into(),
+            detail_ref: None,
+            agent: None,
+            callback: None,
+            risk: None,
+            created_at: Utc::now(),
+            expires_at: expires_in_secs.map(|s| Utc::now() + chrono::Duration::seconds(s)),
+            state: PendingState::Pending,
+            decision_note: None,
+            decided_by: None,
+            decided_at: None,
+            wa_message_id: None,
+        }
+    }
+
+    #[test]
+    fn a_store_that_was_never_bound_keeps_everything_in_memory() {
+        let mut store = PendingStore::default();
+        store.create(item("raised by a test", Some(60)));
+        assert_eq!(store.list().len(), 1);
+        assert!(store.path.is_none(), "an unbound store must not know any file");
+    }
+
+    #[test]
+    fn a_bound_store_saves_under_its_home_and_a_rebound_one_reads_it_back() {
+        let home = tempfile::tempdir().unwrap();
+        let mut a = PendingStore::default();
+        a.bind(store_file(home.path()));
+        let first = a.create(item("one", Some(3600)));
+        let mut b = PendingStore::default();
+        b.bind(store_file(home.path()));
+        assert_eq!(b.list().len(), 1);
+        assert_eq!(b.list()[0].summary, "one");
+        // The next id continues after the saved ones.
+        assert_ne!(b.create(item("two", None)).id, first.id);
+    }
+
+    #[test]
+    fn the_first_home_a_store_is_bound_to_is_the_one_it_keeps() {
+        let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut store = PendingStore::default();
+        store.bind(store_file(one.path()));
+        store.bind(store_file(two.path()));
+        store.create(item("x", None));
+        assert!(store_file(one.path()).is_file());
+        assert!(!store_file(two.path()).exists());
+    }
+
+    #[test]
+    fn an_item_past_its_time_stops_being_listed_and_cannot_be_approved() {
+        let mut store = PendingStore::default();
+        let stale = store.create(item("old", Some(-5)));
+        let live = store.create(item("fresh", Some(600)));
+        assert!(store.sweep_expired());
+        let listed: Vec<_> = store.list().into_iter().map(|i| i.id).collect();
+        assert_eq!(listed, vec![live.id.clone()]);
+        let err = store
+            .resolve(&stale.id, PendingState::Approved, None, "test")
+            .unwrap_err();
+        assert!(err.contains("already expired"), "{err}");
+        assert!(!store.sweep_expired(), "nothing more to sweep");
+    }
 }

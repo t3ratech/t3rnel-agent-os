@@ -94,6 +94,7 @@ pub fn router(
         .route("/api/plugins/{id}/stop", post(stop_plugin))
         .route("/api/plugins/{id}/restart", post(restart_plugin))
         .route("/api/plugins/{id}/state", get(plugin_state))
+        .route("/api/plugins/{id}/status", get(plugin_status))
         .with_state(PluginAdminState {
             manager,
             supervisor,
@@ -163,10 +164,72 @@ async fn plugin_state(
     Ok(Json(serde_json::json!({ "id": id, "state": supervisor_of(&st)?.state(&id) })))
 }
 
+/// How long a plugin gets to answer a status question before it is reported as unreachable.
+const STATUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn level_name(level: i32) -> &'static str {
+    match level {
+        1 => "ok",
+        2 => "attention",
+        3 => "critical",
+        4 => "unreachable",
+        _ => "unspecified",
+    }
+}
+
+/// Everything an operator or agent needs to see about one plugin: the installed version
+/// (from the signed manifest on disk), what the supervisor is doing with it, and, when it
+/// is running, the status report it gives the core.
+async fn plugin_detail(st: &PluginAdminState, id: &str) -> serde_json::Value {
+    let version = std::fs::read(st.manager.plugins_dir().join(id).join("manifest.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|m| m.get("version").and_then(|v| v.as_str()).map(str::to_owned));
+    let state = st.supervisor.as_ref().map(|s| s.state(id));
+    let running = matches!(state, Some(PluginState::Running { .. }));
+    let status = match (&st.briefing, running) {
+        (Some((dispatch, _)), true) => {
+            let ident = Some(t3rnel_runtime::plugin_grpc::pb::PluginIdentity {
+                id: id.to_owned(),
+                ..Default::default()
+            });
+            let ask = dispatch.status_query(
+                id,
+                t3rnel_runtime::plugin_grpc::pb::StatusQueryRequest { plugin: ident, since: None },
+            );
+            match tokio::time::timeout(STATUS_DEADLINE, ask).await {
+                Ok(Ok(r)) => serde_json::json!({
+                    "level": level_name(r.level),
+                    "headline": r.headline,
+                    "metrics": r.metrics,
+                    "detail": r.detail,
+                }),
+                Ok(Err(e)) => serde_json::json!({ "level": "unreachable", "headline": e.message() }),
+                Err(_) => serde_json::json!({ "level": "unreachable", "headline": "no answer within the deadline" }),
+            }
+        }
+        _ => serde_json::Value::Null,
+    };
+    serde_json::json!({ "id": id, "version": version, "state": state, "status": status })
+}
+
+async fn plugin_status(
+    State(st): State<PluginAdminState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if !st.manager.list().contains(&id) {
+        return Err((StatusCode::NOT_FOUND, format!("plugin {id} is not installed")));
+    }
+    Ok(Json(plugin_detail(&st, &id).await))
+}
+
 async fn list_plugins(State(st): State<PluginAdminState>) -> impl IntoResponse {
     let dev_mode = st.install_opts.dev_mode;
+    let ids = st.manager.list();
+    let details = futures::future::join_all(ids.iter().map(|id| plugin_detail(&st, id))).await;
     Json(serde_json::json!({
-        "plugins": st.manager.list(),
+        "plugins": ids,
+        "details": details,
         // What each plugin is doing right now (running, restarting, quarantined, refused).
         "states": st.supervisor.as_ref().map(|s| s.states().into_iter().collect::<std::collections::BTreeMap<_, _>>()),
         // Persistent, machine-readable dev-mode warning — any UI or agent that
@@ -678,6 +741,45 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("org.test.api")));
+        // The list carries each plugin's version and state, not only its id.
+        let detail = &v["details"][0];
+        assert_eq!(detail["id"], "org.test.api");
+        assert_eq!(detail["version"], "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn one_plugins_status_names_its_version_and_unknown_ids_are_404() {
+        let (app, home) = test_router();
+        let plugin_dir = home.path().join("plugins").join("org.test.one");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            br#"{"id":"org.test.one","version":"2.3.4","name":"One"}"#,
+        )
+        .unwrap();
+        let res = app
+            .clone()
+            .oneshot(Request::get("/api/plugins/org.test.one/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["version"], "2.3.4");
+        // No supervisor in this router, so there is no state and no status to report.
+        assert!(v["state"].is_null() && v["status"].is_null());
+
+        let res = app
+            .oneshot(Request::get("/api/plugins/org.test.nope/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn every_status_level_has_a_stable_name() {
+        let names: Vec<_> = (0..=5).map(level_name).collect();
+        assert_eq!(names, ["unspecified", "ok", "attention", "critical", "unreachable", "unspecified"]);
     }
 
     #[tokio::test]

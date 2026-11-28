@@ -914,6 +914,35 @@ impl ConversationService {
                 })?,
         };
 
+        // One approval, one open question per conversation. Asking again (every morning
+        // briefing lists what still waits) returns the binding already out there instead
+        // of sending the person a second prompt with a second id for the same decision.
+        {
+            let now = Utc::now();
+            let open = self
+                .bindings
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|b| {
+                    b.is_live(now)
+                        && b.approval_ref == approval_ref
+                        && b.channel == channel
+                        && b.account == account
+                        && b.thread_key == thread_key
+                })
+                .min_by_key(|b| b.created_at)
+                .cloned();
+            if let Some(existing) = open {
+                self.audit(
+                    "conversations",
+                    &format!("approval.deliver_repeat {} ref={approval_ref}", existing.id),
+                    "already asked",
+                );
+                return Ok(existing);
+            }
+        }
+
         let id = {
             let mut seq = self.binding_seq.lock().unwrap();
             *seq += 1;
@@ -1835,6 +1864,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(f.service.counters().pending_approvals, 1);
+    }
+
+    #[tokio::test]
+    async fn asking_again_for_the_same_approval_returns_the_open_binding_and_sends_no_second_prompt() {
+        let f = fixture();
+        f.service
+            .registry()
+            .connect_all()
+            .await
+            .into_iter()
+            .for_each(|(_, r)| r.unwrap());
+        let pref = f.approvals.add("cap.x", "do x");
+        let ask = |pref: String, thread: &'static str| {
+            let service = f.service.clone();
+            async move {
+                service
+                    .deliver_approval("local:web", "web", thread, thread, "cap.x", "do x", "medium", Some(pref), None)
+                    .await
+                    .unwrap()
+            }
+        };
+        let first = ask(pref.clone(), "+1555").await;
+        let again = ask(pref.clone(), "+1555").await;
+        assert_eq!(first.id, again.id, "the same question keeps the same binding id");
+        assert_eq!(f.service.bindings().len(), 1);
+        assert_eq!(f.adapter.outbound_len(), 1, "the person is asked once, not twice");
+        // A different conversation is a different question; so is a different approval.
+        let other_thread = ask(pref.clone(), "+1666").await;
+        assert_ne!(other_thread.id, first.id);
+        let other_ref = ask(f.approvals.add("cap.y", "do y"), "+1555").await;
+        assert_ne!(other_ref.id, first.id);
+        assert_eq!(f.service.bindings().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_answered_approval_can_be_asked_about_again_as_a_new_binding() {
+        let f = fixture();
+        f.service
+            .registry()
+            .connect_all()
+            .await
+            .into_iter()
+            .for_each(|(_, r)| r.unwrap());
+        let pref = f.approvals.add("cap.x", "do x");
+        let first = f
+            .service
+            .deliver_approval("local:web", "web", "+1555", "+1555", "cap.x", "do x", "medium", Some(pref.clone()), None)
+            .await
+            .unwrap();
+        f.service
+            .resolve_binding(&first.id, ApprovalVerdict::Deny, "test", None)
+            .await
+            .unwrap();
+        let second = f
+            .service
+            .deliver_approval("local:web", "web", "+1555", "+1555", "cap.x", "do x", "medium", Some(pref), None)
+            .await
+            .unwrap();
+        assert_ne!(first.id, second.id, "a closed binding is not reused");
     }
 
     #[tokio::test]

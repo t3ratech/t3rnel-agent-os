@@ -62,6 +62,9 @@ where
     }
 }
 
+/// Sent on a request whose plugin named no client of its own.
+pub const DEFAULT_USER_AGENT: &str = concat!("t3rnel-egress/", env!("CARGO_PKG_VERSION"));
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
     #[error("url must be absolute http(s) without credentials or a fragment")]
@@ -645,6 +648,12 @@ impl PluginProxy {
         for (k, v) in &headers {
             rb = rb.header(k.as_str(), v.as_str());
         }
+        // Some APIs refuse a request that names no client at all (GitHub answers 403
+        // "Request forbidden by administrative rules"). A plugin that sets its own
+        // User-Agent keeps it; one that sets none is identified as this proxy.
+        if !headers.keys().any(|k| k.eq_ignore_ascii_case("user-agent")) {
+            rb = rb.header("User-Agent", DEFAULT_USER_AGENT);
+        }
         if !signed_body.is_empty() || method == "POST" || method == "PUT" || method == "PATCH" {
             rb = rb.body(signed_body.clone());
         }
@@ -1210,6 +1219,23 @@ mod tests {
         port
     }
 
+    /// An upstream that records the request head it receives and answers 200.
+    async fn recording_upstream() -> (u16, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_lowercase());
+                let _ = sock.write_all(&http_reply("", "ok")).await;
+            }
+        });
+        (port, rx)
+    }
+
     fn get(url: String) -> ProxyRequest {
         ProxyRequest {
             url,
@@ -1424,6 +1450,28 @@ mod tests {
         let err = proxy.request(&get(format!("http://127.0.0.1:{port}/"))).await.unwrap_err();
         assert!(matches!(err, ProxyError::Upstream(_)), "{err:?}");
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "timeout did not apply");
+    }
+
+    // ---- client identification -------------------------------------------------------------------
+    #[tokio::test]
+    async fn a_request_that_names_no_client_is_sent_with_the_proxys_user_agent() {
+        let (port, head) = recording_upstream().await;
+        let proxy = PluginProxy::new("org.test.p", vec![open_rule(port, &["*"])], vec![], resolver());
+        proxy.request(&get(format!("http://127.0.0.1:{port}/"))).await.unwrap();
+        let head = head.await.unwrap();
+        assert!(head.contains(&format!("user-agent: {}", DEFAULT_USER_AGENT.to_lowercase())), "{head}");
+    }
+
+    #[tokio::test]
+    async fn a_user_agent_the_plugin_chose_is_kept_and_not_duplicated() {
+        let (port, head) = recording_upstream().await;
+        let proxy = PluginProxy::new("org.test.p", vec![open_rule(port, &["*"])], vec![], resolver());
+        let mut req = get(format!("http://127.0.0.1:{port}/"));
+        req.headers.insert("user-agent".into(), "my-plugin/9".into());
+        proxy.request(&req).await.unwrap();
+        let head = head.await.unwrap();
+        assert!(head.contains("user-agent: my-plugin/9"), "{head}");
+        assert_eq!(head.matches("user-agent:").count(), 1, "{head}");
     }
 
     // ---- secret hygiene --------------------------------------------------------------------------

@@ -762,6 +762,33 @@ impl PluginManager {
         Ok(log.len())
     }
 
+    /// Loopback and private addresses the plugin's signed manifest declares but the owner has
+    /// not granted in `plugin_private_hosts`. The proxy refuses every one of them ("resolves to
+    /// a non-public address and is not declared"), so a plugin that depends on a local service
+    /// fails quietly until the grant exists; this names them so they can be reported at start.
+    pub fn ungranted_private_hosts(
+        &self,
+        id: &str,
+        granted: &BTreeMap<String, Vec<String>>,
+    ) -> Vec<String> {
+        let manifest: serde_json::Value = match fs::read(self.plugins_dir().join(id).join("manifest.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+        {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        let own = granted.get(id).map(Vec::as_slice).unwrap_or_default();
+        manifest["permissions"]["network_hosts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|h| h.as_str())
+            .filter(|h| declared_host_is_private(h) && !own.iter().any(|g| g == h))
+            .map(str::to_string)
+            .collect()
+    }
+
     /// Whether the plugin may be launched: not quarantined and (if required)
     /// signature-verified install record exists.
     pub fn launch_permitted(&self, id: &str) -> Result<(), LifecycleError> {
@@ -869,6 +896,20 @@ pub fn write_private_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         opts.mode(0o600);
     }
     opts.open(path)?.write_all(bytes)
+}
+
+/// True for `localhost` and for an IP literal in a private, loopback or special range, with or
+/// without a `:port`.
+fn declared_host_is_private(host: &str) -> bool {
+    let name = match host.rsplit_once(':') {
+        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => host,
+    };
+    let name = name.trim_start_matches('[').trim_end_matches(']');
+    name.eq_ignore_ascii_case("localhost")
+        || name
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| t3rnel_egress::is_private_or_special(&ip))
 }
 
 /// Names that are package metadata, not payload.
@@ -1057,6 +1098,40 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+
+    #[test]
+    fn local_hosts_a_plugin_declares_but_the_owner_has_not_granted_are_named() {
+        let home = tempfile::tempdir().unwrap();
+        let mgr = PluginManager::new(home.path());
+        let dir = mgr.plugins_dir().join("org.test.local");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("manifest.json"),
+            br#"{"id":"org.test.local","version":"1.0.0","name":"L","permissions":{
+                "network_hosts":["api.example.com","127.0.0.1:3001","127.0.0.1:5055","localhost:9","10.1.2.3","[::1]:80"]}}"#,
+        )
+        .unwrap();
+        let mut granted = BTreeMap::new();
+        let all = mgr.ungranted_private_hosts("org.test.local", &granted);
+        assert_eq!(all, ["127.0.0.1:3001", "127.0.0.1:5055", "localhost:9", "10.1.2.3", "[::1]:80"]);
+        granted.insert("org.test.local".to_string(), vec!["127.0.0.1:3001".to_string()]);
+        let rest = mgr.ungranted_private_hosts("org.test.local", &granted);
+        assert!(!rest.contains(&"127.0.0.1:3001".to_string()) && rest.len() == 4, "{rest:?}");
+        // A grant to another plugin is no grant for this one, and an unknown plugin has nothing.
+        let other = BTreeMap::from([("org.other".to_string(), vec!["127.0.0.1:3001".to_string()])]);
+        assert_eq!(mgr.ungranted_private_hosts("org.test.local", &other).len(), 5);
+        assert!(mgr.ungranted_private_hosts("org.test.nope", &granted).is_empty());
+    }
+
+    #[test]
+    fn only_loopback_private_and_localhost_count_as_local_hosts() {
+        for h in ["127.0.0.1", "127.0.0.1:3001", "localhost", "LOCALHOST:80", "192.168.1.5:22", "10.0.0.1", "[::1]:8080"] {
+            assert!(declared_host_is_private(h), "{h}");
+        }
+        for h in ["api.example.com", "api.example.com:443", "8.8.8.8", "1.1.1.1:53", "coarena.ai"] {
+            assert!(!declared_host_is_private(h), "{h}");
+        }
+    }
 
     fn make_pkg(dir: &Path, id: &str, version: &str, sign: bool) -> PathBuf {
         let pkg = dir.join(format!("pkg-{id}-{version}"));

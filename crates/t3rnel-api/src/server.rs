@@ -1158,6 +1158,14 @@ pub async fn build_router(
         dispatch.attach_conversations(conv_state.service.clone());
         // Every installed plugin contributes a section to the morning briefing.
         for id in plugin_mgr.list() {
+            let ungranted = plugin_mgr.ungranted_private_hosts(&id, &kernel.config.plugin_private_hosts);
+            if !ungranted.is_empty() {
+                tracing::warn!(
+                    plugin = %id,
+                    hosts = ?ungranted,
+                    "plugin declares local services the owner has not granted; the proxy will refuse them (add them under [plugin_private_hosts] in config.toml)"
+                );
+            }
             conv_state.briefing.register_source(Arc::new(
                 t3rnel_runtime::plugin_grpc::DispatchBriefingSource::new(dispatch.clone(), id),
             ));
