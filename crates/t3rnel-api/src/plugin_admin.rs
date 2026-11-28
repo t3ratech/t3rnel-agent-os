@@ -95,6 +95,8 @@ pub fn router(
         .route("/api/plugins/{id}/restart", post(restart_plugin))
         .route("/api/plugins/{id}/state", get(plugin_state))
         .route("/api/plugins/{id}/status", get(plugin_status))
+        .route("/api/plugins/{id}/clear-quarantine", post(clear_quarantine))
+        .route("/api/plugins/{id}/route/{*path}", axum::routing::any(plugin_route))
         .with_state(PluginAdminState {
             manager,
             supervisor,
@@ -221,6 +223,91 @@ async fn plugin_status(
         return Err((StatusCode::NOT_FOUND, format!("plugin {id} is not installed")));
     }
     Ok(Json(plugin_detail(&st, &id).await))
+}
+
+/// Forget a plugin's crashes and start it again. The owner's action; a plugin cannot reach it.
+async fn clear_quarantine(
+    State(st): State<PluginAdminState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let forgotten = st.manager.clear_quarantine(&id).map_err(err)?;
+    if let Some(sup) = &st.supervisor {
+        sup.start(&id).await.map_err(supervisor_err)?;
+    }
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "crashes_forgotten": forgotten,
+        "state": st.supervisor.as_ref().map(|s| s.state(&id)),
+    })))
+}
+
+/// Largest request body forwarded to a plugin route.
+const ROUTE_BODY_LIMIT: usize = 1024 * 1024;
+/// How long a plugin gets to answer a forwarded route call.
+const ROUTE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The front door for a plugin's own HTTP routes: `/api/plugins/{id}/route/<path>` is forwarded to
+/// the plugin over the connection the core holds with it (`PluginCallbacks.HandleRoute`). The
+/// caller has already passed the daemon's own authentication; the plugin sees only the principal
+/// `api`, never the caller's credentials, because `authorization` and `cookie` are not forwarded.
+async fn plugin_route(
+    State(st): State<PluginAdminState>,
+    Path((id, tail)): Path<(String, String)>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let Some((dispatch, _)) = &st.briefing else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "this host does not dispatch to plugins".into()));
+    };
+    if !st.manager.list().contains(&id) {
+        return Err((StatusCode::NOT_FOUND, format!("plugin {id} is not installed")));
+    }
+    if body.len() > ROUTE_BODY_LIMIT {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "request body too large".into()));
+    }
+    let path = match uri.query() {
+        Some(q) => format!("/{tail}?{q}"),
+        None => format!("/{tail}"),
+    };
+    let forwarded: std::collections::HashMap<String, String> = headers
+        .iter()
+        .filter(|(k, _)| {
+            !matches!(k.as_str(), "authorization" | "cookie" | "host" | "content-length" | "x-api-key")
+        })
+        .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
+        .collect();
+    let request = t3rnel_runtime::plugin_grpc::pb::RouteRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        method: method.as_str().to_string(),
+        path,
+        headers: forwarded,
+        body: Some(t3rnel_runtime::plugin_grpc::pb::Payload {
+            data: body.to_vec(),
+            content_type: headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/json")
+                .to_string(),
+            ..Default::default()
+        }),
+        principal: "api".to_string(),
+    };
+    let reply = tokio::time::timeout(ROUTE_DEADLINE, dispatch.handle_route(&id, request))
+        .await
+        .map_err(|_| (StatusCode::GATEWAY_TIMEOUT, format!("plugin {id} did not answer in time")))?
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("plugin {id}: {}", e.message())))?;
+    let status = StatusCode::from_u16(reply.status as u16).unwrap_or(StatusCode::BAD_GATEWAY);
+    let (data, content_type) = reply
+        .body
+        .map(|b| (b.data, if b.content_type.is_empty() { "application/json".to_string() } else { b.content_type }))
+        .unwrap_or_default();
+    axum::response::Response::builder()
+        .status(status)
+        .header("content-type", content_type)
+        .body(axum::body::Body::from(data))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn list_plugins(State(st): State<PluginAdminState>) -> impl IntoResponse {
@@ -774,6 +861,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_route_call_for_an_unknown_plugin_or_without_dispatch_is_refused() {
+        // This router has no dispatch (None): the front door says so instead of guessing.
+        let (app, _home) = test_router();
+        let res = app
+            .oneshot(Request::get("/api/plugins/org.test.nope/route/plugin/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]

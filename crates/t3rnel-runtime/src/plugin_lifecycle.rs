@@ -762,6 +762,18 @@ impl PluginManager {
         Ok(log.len())
     }
 
+    /// Forget a plugin's recent crashes so it may be started again. This is the owner's act:
+    /// it is reachable only through the daemon's own API, never through a host service a
+    /// plugin can call, and it is audited. Returns how many crashes were forgotten.
+    pub fn clear_quarantine(&self, id: &str) -> Result<usize, LifecycleError> {
+        validate_plugin_id(id).map_err(|e| LifecycleError::Manifest(e.to_string()))?;
+        let forgotten = self.record_crash_readonly(id)?;
+        let storage = PluginStorage::open(&self.home, id)?;
+        storage.state_set("crashlog", "[]")?;
+        storage.audit_append("lifecycle.quarantine_cleared", &forgotten.to_string())?;
+        Ok(forgotten)
+    }
+
     /// Loopback and private addresses the plugin's signed manifest declares but the owner has
     /// not granted in `plugin_private_hosts`. The proxy refuses every one of them ("resolves to
     /// a non-public address and is not declared"), so a plugin that depends on a local service
@@ -1098,6 +1110,23 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+
+    #[test]
+    fn the_owner_can_clear_a_quarantine_and_the_plugin_may_launch_again() {
+        let home = tempfile::tempdir().unwrap();
+        let mgr = PluginManager::new(home.path());
+        let pkg = make_pkg(home.path(), "org.test.crashy", "1.0.0", false);
+        mgr.install(&pkg, &InstallOptions { require_signature: false, trusted_keys: vec![], dev_mode: true })
+            .unwrap();
+        for _ in 0..3 {
+            mgr.record_crash("org.test.crashy").unwrap();
+        }
+        assert!(matches!(mgr.launch_permitted("org.test.crashy"), Err(LifecycleError::Quarantined(_, 3))));
+        assert_eq!(mgr.clear_quarantine("org.test.crashy").unwrap(), 3);
+        mgr.launch_permitted("org.test.crashy").unwrap();
+        assert_eq!(mgr.clear_quarantine("org.test.crashy").unwrap(), 0);
+        assert!(mgr.clear_quarantine("org.test.nope").is_err());
+    }
 
     #[test]
     fn local_hosts_a_plugin_declares_but_the_owner_has_not_granted_are_named() {
